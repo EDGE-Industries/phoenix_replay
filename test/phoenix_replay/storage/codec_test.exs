@@ -67,6 +67,16 @@ defmodule PhoenixReplay.Storage.CodecTest do
              {:error, :undecodable}
   end
 
+  test "non-executable decoding keeps data and rejects functions and unknown atoms" do
+    term = %{saved: [nil, {1, "two"}]}
+    assert {:ok, ^term} = Codec.decode_non_executable(Codec.encode(term))
+    assert {:error, :undecodable} = Codec.decode_non_executable(Codec.encode(&Enum.count/1))
+    assert {:error, :undecodable} = Codec.decode_non_executable("invalid")
+
+    assert {:error, :undecodable} =
+             Codec.decode_non_executable(<<131, 119, 20, "phoenix_replay_nope_2">>)
+  end
+
   test "frames survive appending and stop at a torn or corrupt frame" do
     binary =
       IO.iodata_to_binary([Codec.frame(:first), Codec.frame(%{second: [2]}), Codec.frame(3)])

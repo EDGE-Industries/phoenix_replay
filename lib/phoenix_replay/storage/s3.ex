@@ -326,20 +326,8 @@ if Code.ensure_loaded?(ExAws.S3) do
     defp decode_shape(_term, _shape), do: {:error, :undecodable}
 
     defp read_term(key, opts) do
-      Enum.each(
-        [
-          Recording,
-          Recording.Client,
-          Recording.Client.Landing,
-          Event,
-          Summary,
-          PhoenixReplay.Capture.Browser
-        ],
-        &Code.ensure_loaded!/1
-      )
-
       case request(ExAws.S3.get_object(bucket(opts), key), opts) do
-        {:ok, %{body: body}} -> {:ok, Plug.Crypto.non_executable_binary_to_term(body, [:safe])}
+        {:ok, %{body: body}} -> Codec.decode_non_executable(body)
         {:error, {:http_error, 404, _}} -> {:error, :not_found}
         {:error, reason} -> {:error, reason}
       end

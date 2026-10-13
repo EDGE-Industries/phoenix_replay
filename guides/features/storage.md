@@ -75,10 +75,10 @@ endpoints through ExAws. Set `writer_node` to a non-empty identity that is
 unique per node and stable across restarts. The adapter hashes this identity
 into the partial-object path so recovery does not mix writers.
 
-Reads load the known recording and browser-metadata modules before safe term
-decoding, so a cold node can list saved sessions. The adapter does not load
-application modules from stored data. Unknown application atoms can make a
-recording unreadable until its modules are loaded.
+Reads use the shared codec to decode non-executable terms. On a cold node, a
+failed decode loads modules available on the code path once and retries, as
+file storage does. This loads existing library and application code, not module
+names supplied by stored data. Unknown atoms without code remain unreadable.
 
 ## Running sessions
 

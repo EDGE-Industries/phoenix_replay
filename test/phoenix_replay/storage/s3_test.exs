@@ -47,6 +47,7 @@ defmodule PhoenixReplay.Storage.S3Test do
     assert [%Summary{id: "trial"}] = S3.list(context.opts)
   end
 
+  @tag timeout: 120_000
   test "a cold node can list stored summaries", context do
     recording = %{
       context.recording
@@ -73,6 +74,42 @@ defmodule PhoenixReplay.Storage.S3Test do
     end
     result = PhoenixReplay.Storage.S3.list(bucket: "bucket", prefix: "cold", writer_node: "cold", request: request)
     if length(result) != 1, do: raise("cold summary read failed")
+    """
+
+    args = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)]) ++ ["-e", code]
+
+    {output, status} =
+      System.cmd(System.find_executable("elixir"), args,
+        env: [{"ERL_FLAGS", "+S 2:2"}],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+  end
+
+  @tag timeout: 120_000
+  test "a cold node can fetch recorded application structs", context do
+    event = %Event{
+      type: :render,
+      at: 0,
+      data: %{assigns: %{snapshot: %PhoenixReplay.Test.ColdState{}}}
+    }
+
+    body =
+      %{context.recording | view: PhoenixReplay.Test.ColdState, events: [event]}
+      |> Codec.encode()
+      |> Base.encode64()
+
+    code = """
+    body = Base.decode64!(#{inspect(body)})
+    opts = [bucket: "bucket", prefix: "cold", writer_node: "cold",
+            request: fn _ -> {:ok, %{body: body}} end]
+    case PhoenixReplay.Storage.S3.fetch("trial", opts) do
+      {:ok, recording} ->
+        state = recording.events |> hd() |> Map.fetch!(:data) |> Map.fetch!(:assigns) |> Map.values() |> hd()
+        if Map.from_struct(state) != %{replay_cold_assign: :loaded}, do: raise("recorded struct changed")
+      error -> raise("cold recording read failed: \#{inspect(error)}")
+    end
     """
 
     args = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)]) ++ ["-e", code]
