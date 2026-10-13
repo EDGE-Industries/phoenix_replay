@@ -47,6 +47,45 @@ defmodule PhoenixReplay.Storage.S3Test do
     assert [%Summary{id: "trial"}] = S3.list(context.opts)
   end
 
+  test "a cold node can list stored summaries", context do
+    recording = %{
+      context.recording
+      | client: %PhoenixReplay.Recording.Client{
+          viewport: %{
+            width: 1280,
+            height: 720,
+            dpr: 2,
+            pointer: :fine,
+            color_scheme: :dark,
+            contrast: :no_preference,
+            hover: :hover
+          }
+        }
+    }
+
+    body = recording |> Summary.new() |> Codec.encode() |> Base.encode64()
+
+    code = """
+    body = Base.decode64!(#{inspect(body)})
+    request = fn
+      %{path: "/"} -> {:ok, %{body: %{contents: [%{key: "cold/summaries/trial.summary"}], is_truncated: "false"}}}
+      _operation -> {:ok, %{body: body}}
+    end
+    result = PhoenixReplay.Storage.S3.list(bucket: "bucket", prefix: "cold", writer_node: "cold", request: request)
+    if length(result) != 1, do: raise("cold summary read failed")
+    """
+
+    args = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)]) ++ ["-e", code]
+
+    {output, status} =
+      System.cmd(System.find_executable("elixir"), args,
+        env: [{"ERL_FLAGS", "+S 2:2"}],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+  end
+
   test "clear preserves unrelated objects", context do
     Agent.update(context.store, &Map.put(&1, "/media/image.jpg", "image"))
     assert :ok = S3.save(context.recording, context.opts)

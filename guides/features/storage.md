@@ -75,6 +75,11 @@ endpoints through ExAws. Set `writer_node` to a non-empty identity that is
 unique per node and stable across restarts. The adapter hashes this identity
 into the partial-object path so recovery does not mix writers.
 
+Reads load the known recording and browser-metadata modules before safe term
+decoding, so a cold node can list saved sessions. The adapter does not load
+application modules from stored data. Unknown application atoms can make a
+recording unreadable until its modules are loaded.
+
 ## Running sessions
 
 A running session is buffered in memory. With file storage, PhoenixReplay also writes it to disk in chunks while it runs, so its events leave memory however long it lasts, and a crash of the node loses at most the last few seconds:
