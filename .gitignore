@@ -25,10 +25,6 @@ phoenix_replay-*.tar
 # JavaScript tooling for type-aware linting.
 /node_modules/
 
-# The dashboard bundle, built by `mix assets.build` and into every Hex
-# package by the hex.build and hex.publish aliases.
-/priv/static/
-
 # Recordings written while developing against the default storage path.
 /priv/replay_recordings/
 

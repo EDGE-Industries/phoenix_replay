@@ -72,6 +72,8 @@ infrastructure = [
   "PhoenixReplay.Storage.Ecto.Migration",
   "PhoenixReplay.Storage.File",
   "PhoenixReplay.Storage.File.Index",
+  "PhoenixReplay.Storage.S3",
+  "PhoenixReplay.Storage.Writer",
   "PhoenixReplay.Telemetry"
 ]
 

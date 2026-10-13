@@ -59,6 +59,8 @@ defmodule PhoenixReplay.MixProject do
         {:ecto_sql, "~> 3.12", optional: true},
         {:ecto_sqlite3, "~> 0.22", only: :test},
         {:postgrex, "~> 0.22", only: :test},
+        {:ex_aws, "~> 2.5", optional: true},
+        {:ex_aws_s3, "~> 2.5", optional: true},
         {:jason, "~> 1.4", optional: true},
         {:obscura, "~> 0.2", optional: true},
         {:lazy_html, ">= 0.1.0", only: :test},
@@ -170,7 +172,9 @@ defmodule PhoenixReplay.MixProject do
           PhoenixReplay.Storage,
           PhoenixReplay.Storage.Ecto,
           PhoenixReplay.Storage.Ecto.Migration,
-          PhoenixReplay.Storage.File
+          PhoenixReplay.Storage.File,
+          PhoenixReplay.Storage.S3,
+          PhoenixReplay.Sanitizer.Serializable
         ],
         Dashboard: [PhoenixReplay.Router],
         "Mix Tasks": [Mix.Tasks.PhoenixReplay.Install],

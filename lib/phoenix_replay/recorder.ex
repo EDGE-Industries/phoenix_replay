@@ -9,7 +9,7 @@ defmodule PhoenixReplay.Recorder do
   Options given as `{PhoenixReplay.Recorder, opts}` override the
   `PhoenixReplay.Config` values for that live session. `:sample_rate`,
   `:keep`, `:max_events`, `:sanitizer`, `:redact`, `:flush`, `:pointer` and
-  `:state` are accepted:
+  `:state`, `:exclude_assigns` and `:capture_assigns` are accepted:
 
       live_session :checkout,
         on_mount: [{PhoenixReplay.Recorder, keep: [rate: 0.1, errors: true]}] do
@@ -50,9 +50,10 @@ defmodule PhoenixReplay.Recorder do
     ]
 
   alias PhoenixReplay.{Config, Migration, Recording}
-  alias PhoenixReplay.Capture.{Assigns, Browser, Pointer, State}
+  alias PhoenixReplay.Capture.{Browser, Pointer, Policy, State}
   alias PhoenixReplay.Session.{Buffer, Monitor}
 
+  @decision :phoenix_replay_decided
   @private :phoenix_replay
   @record_event "phx_replay:record"
   @pointer_event Pointer.event()
@@ -66,7 +67,9 @@ defmodule PhoenixReplay.Recorder do
     :redact,
     :flush,
     :pointer,
-    :state
+    :state,
+    :exclude_assigns,
+    :capture_assigns
   ]
 
   @doc """
@@ -83,9 +86,14 @@ defmodule PhoenixReplay.Recorder do
           {:cont, Phoenix.LiveView.Socket.t()}
   def on_mount(:default, params, session, socket), do: on_mount([], params, session, socket)
 
+  def on_mount(opts, _params, _session, %{private: %{@decision => true}} = socket)
+      when is_list(opts),
+      do: {:cont, socket}
+
   def on_mount(opts, params, session, socket) when is_list(opts) do
     Keyword.validate!(opts, @session_options)
     config = Config.load(opts)
+    socket = put_private(socket, @decision, true)
 
     if connected?(socket) and sampled?(config.sample_rate) and memory?(config.max_memory),
       do: {:cont, start(socket, params, session, config)},
@@ -107,11 +115,13 @@ defmodule PhoenixReplay.Recorder do
 
   defp start(socket, params, session, config) do
     sanitizer = config.sanitizer
+    policy = Policy.resolve(socket.view, config)
     # The request context PhoenixReplay.Plug kept is recorded once, in client.
     {kept, session} = Map.pop(session, PhoenixReplay.Plug.session_key())
 
     recording = %Recording{
       id: Recording.generate_id(),
+      capture_policy: Policy.metadata(policy),
       view: socket.view,
       params: if(is_map(params), do: sanitizer.sanitize_params(params), else: %{}),
       session: sanitizer.sanitize_params(session),
@@ -134,6 +144,9 @@ defmodule PhoenixReplay.Recorder do
       url?: false,
       layout?: false,
       sanitizer: sanitizer,
+      policy: policy,
+      captured_assigns: nil,
+      capture_failed?: false,
       pointer: config.pointer,
       state: config.state
     }
@@ -144,7 +157,7 @@ defmodule PhoenixReplay.Recorder do
       pointer: config.pointer && Pointer.settings(config.pointer),
       state: config.state && State.settings(config.state)
     })
-    |> record(:mount, %{assigns: Assigns.view(socket.assigns, sanitizer)})
+    |> capture_mount()
     |> attach_hook(@private, :handle_event, &handle_event/3)
     |> attach_params_hook(params)
     |> attach_hook(@private, :handle_info, &handle_info/2)
@@ -207,16 +220,64 @@ defmodule PhoenixReplay.Recorder do
 
   defp after_render(socket), do: socket |> capture_layout() |> record_render()
 
-  defp record_render(%{assigns: %{__changed__: changed}} = socket) when map_size(changed) > 0 do
-    %{sanitizer: sanitizer} = socket.private[@private]
+  defp capture_mount(socket) do
+    %{policy: policy, sanitizer: sanitizer} = socket.private[@private]
 
-    case socket.assigns |> Map.take(Map.keys(changed)) |> Assigns.view(sanitizer) do
-      assigns when map_size(assigns) > 0 -> record(socket, :render, %{assigns: assigns})
-      _empty -> socket
+    result =
+      if policy.transform && not Map.get(policy, :failed, false),
+        do: {:ok, %{}},
+        else: Policy.capture(policy, socket.assigns, sanitizer)
+
+    case result do
+      {:ok, assigns} ->
+        socket |> remember(assigns) |> record(:mount, %{assigns: assigns})
+
+      {:error, _reason} ->
+        socket |> record(:mount, %{assigns: %{}}) |> capture_failed()
+    end
+  end
+
+  defp record_render(%{private: %{@private => %{capture_failed?: true}}} = socket), do: socket
+
+  defp record_render(%{assigns: %{__changed__: changed}} = socket) when map_size(changed) > 0 do
+    %{policy: policy, sanitizer: sanitizer, captured_assigns: previous} = socket.private[@private]
+
+    source =
+      if policy.transform, do: socket.assigns, else: Map.take(socket.assigns, Map.keys(changed))
+
+    case Policy.capture(policy, source, sanitizer) do
+      {:ok, assigns} ->
+        data =
+          if policy.transform,
+            do: Policy.diff(previous, assigns),
+            else: %{assigns: assigns, removed: Map.keys(changed) -- Map.keys(socket.assigns)}
+
+        socket = if policy.transform, do: remember(socket, assigns), else: socket
+
+        if map_size(data.assigns) > 0 or data.removed != [],
+          do: record(socket, :render, data),
+          else: socket
+
+      {:error, _reason} ->
+        capture_failed(socket)
     end
   end
 
   defp record_render(socket), do: socket
+
+  defp remember(socket, assigns) do
+    state = socket.private[@private]
+    snapshot = if state.policy.transform, do: assigns, else: nil
+    put_private(socket, @private, %{state | captured_assigns: snapshot})
+  end
+
+  defp capture_failed(socket) do
+    :telemetry.execute([:phoenix_replay, :capture, :failed], %{}, %{view: socket.view})
+
+    socket
+    |> put_private(@private, %{socket.private[@private] | capture_failed?: true})
+    |> record(:log, %{level: :error, message: "Replay assign capture failed", metadata: %{}})
+  end
 
   # The layout is settled by the first render: `mount/3` or an `on_mount`
   # hook may have returned one with `layout:`, which LiveView keeps in

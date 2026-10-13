@@ -53,6 +53,16 @@ config :phoenix_replay, sanitizer: MyApp.ReplaySanitizer
 
 A sanitizer can also be set per live session with `on_mount: [{PhoenixReplay.Recorder, sanitizer: MyApp.CheckoutSanitizer}]`. Keep sanitizers free of exceptions: they run inside your LiveViews.
 
+For recordings that can contain runtime values such as functions or process
+identifiers, use `PhoenixReplay.Sanitizer.Serializable`. It keeps the default
+key filtering and replaces functions, pids, ports and references with `nil`,
+including values nested in structs, maps, lists and tuples:
+
+```elixir
+config :phoenix_replay,
+  sanitizer: PhoenixReplay.Sanitizer.Serializable
+```
+
 ## Redacting values
 
 A sanitizer runs inside your LiveViews on every event, so it filters by key, which is cheap. An email address typed into a form, a card number in a log message or a phone number in SQL carries no telling key. Finding those takes detection, so a `PhoenixReplay.Redactor` masks them when a session is saved, in a background task, where its cost never reaches your users.

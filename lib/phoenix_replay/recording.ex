@@ -34,7 +34,8 @@ defmodule PhoenixReplay.Recording do
           dropped: %{String.t() => pos_integer()},
           client: Client.t(),
           code: PhoenixReplay.Recording.Code.t() | nil,
-          layout: layout() | nil
+          layout: layout() | nil,
+          capture_policy: map()
         }
 
   @typedoc "A layout by module and template name, such as `{\"MyAppWeb.Layouts\", \"app\"}`, or `false` for none."
@@ -71,7 +72,8 @@ defmodule PhoenixReplay.Recording do
     client: %Client{},
     # Which code made the recording; nil for one made before it was kept.
     code: nil,
-    layout: nil
+    layout: nil,
+    capture_policy: %{}
   ]
 
   @doc """

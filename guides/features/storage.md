@@ -46,6 +46,35 @@ The table is versioned, and pinning the version keeps the migration doing the sa
 
 The dashboard reads one page at a time in SQL, with a count for the total. Event names are stored encoded, so text search, which also matches event names, and filtering by an event name check the rows that match the other filters after reading them. The names the filter suggests come from the 500 most recent recordings.
 
+## S3
+
+Store recordings in an S3-compatible object store with the optional `ex_aws`
+and `ex_aws_s3` dependencies. Supply ExAws with an HTTP client and XML parser
+as well; for example, `req` and `sweet_xml`, with
+`config :ex_aws, http_client: ExAws.Request.Req`. The bucket must already exist.
+Use the serializable sanitizer when assigns contain runtime functions or handles:
+
+```elixir
+config :phoenix_replay,
+  storage: {
+    PhoenixReplay.Storage.S3,
+    bucket: "my-replay-bucket",
+    prefix: "my-app/replays",
+    writer_node: "my-app-node-1"
+  },
+  sanitizer: PhoenixReplay.Sanitizer.Serializable
+```
+
+The adapter writes recordings below `recordings/`, summaries below
+`summaries/`, and running-session chunks below `partials/` under the prefix.
+It lists and reads summaries for the dashboard, stores chunks as immutable
+objects, and retries publication during recovery when a completed recording has
+no summary. It uses `&ExAws.request/1` by default; pass an equivalent request
+function in tests and custom clients. Configure credentials, regions and
+endpoints through ExAws. Set `writer_node` to a non-empty identity that is
+unique per node and stable across restarts. The adapter hashes this identity
+into the partial-object path so recovery does not mix writers.
+
 ## Running sessions
 
 A running session is buffered in memory. With file storage, PhoenixReplay also writes it to disk in chunks while it runs, so its events leave memory however long it lasts, and a crash of the node loses at most the last few seconds:

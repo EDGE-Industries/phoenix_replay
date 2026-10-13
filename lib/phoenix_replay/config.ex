@@ -12,6 +12,11 @@ defmodule PhoenixReplay.Config do
       Defaults to `{PhoenixReplay.Storage.File, []}`.
     * `:sanitizer` — module implementing `PhoenixReplay.Sanitizer`.
       Defaults to `PhoenixReplay.Sanitizer.Default`.
+    * `:exclude_assigns` — top-level view assign keys omitted from capture.
+      Global, session, and view exclusions are combined by union.
+    * `:capture_assigns` — a function of one argument or `{module, function}`
+      that returns a map from the full current view assigns. A view's
+      `replay_capture_assigns/1` takes precedence. Defaults to `nil`.
     * `:max_events` — events recorded per session before recording stops.
       Defaults to `10_000`.
     * `:sample_rate` — share of sessions to record, from `0.0` to `1.0`.
@@ -308,6 +313,8 @@ defmodule PhoenixReplay.Config do
   @type t :: %__MODULE__{
           storage: storage(),
           sanitizer: module(),
+          exclude_assigns: [atom()],
+          capture_assigns: function() | {module(), atom()} | nil,
           max_events: pos_integer(),
           sample_rate: float(),
           keep: keep(),
@@ -328,6 +335,8 @@ defmodule PhoenixReplay.Config do
 
   defstruct storage: {PhoenixReplay.Storage.File, []},
             sanitizer: PhoenixReplay.Sanitizer.Default,
+            exclude_assigns: [],
+            capture_assigns: nil,
             max_events: 10_000,
             sample_rate: 1.0,
             keep: %{rate: 1.0, errors: false, marks: false, slower_than: nil},
@@ -386,6 +395,20 @@ defmodule PhoenixReplay.Config do
   end
 
   defp module_key?(key), do: match?("Elixir." <> _rest, Atom.to_string(key))
+
+  defp put({:exclude_assigns, keys}, config) when is_list(keys) do
+    if Enum.all?(keys, &is_atom/1),
+      do: %{config | exclude_assigns: Enum.uniq(config.exclude_assigns ++ keys)},
+      else: invalid!(:exclude_assigns, keys)
+  end
+
+  defp put({:capture_assigns, nil}, config), do: %{config | capture_assigns: nil}
+
+  defp put({:capture_assigns, fun}, config) when is_function(fun, 1),
+    do: %{config | capture_assigns: fun}
+
+  defp put({:capture_assigns, {module, fun}}, config) when is_atom(module) and is_atom(fun),
+    do: %{config | capture_assigns: {module, fun}}
 
   defp put({:storage, {module, opts}}, config) when is_atom(module) and is_list(opts),
     do: %{config | storage: {module, opts}}
