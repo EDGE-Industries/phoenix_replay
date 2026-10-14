@@ -157,7 +157,7 @@ if Code.ensure_loaded?(Ecto.Query) do
       {page, total} =
         %{filter | event: nil, query: nil}
         |> matching(page_opts)
-        |> EctoQuery.page(page_opts)
+        |> order_by([r], desc: r.connected_at, desc: r.id)
         |> select([r], map(r, ^[:event_names | @summary_fields]))
         |> repo(opts).all()
         |> Enum.map(&to_summary/1)
