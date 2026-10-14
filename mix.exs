@@ -58,7 +58,7 @@ defmodule PhoenixReplay.MixProject do
         {:igniter, ">= 0.8.4 and < 1.0.0", optional: true},
         {:ecto_sql, "~> 3.12", optional: true},
         {:ecto_sqlite3, "~> 0.22", only: :test},
-        {:postgrex, "~> 0.22", only: :test},
+        {:postgrex, "~> 0.22", optional: true},
         {:ex_aws, "~> 2.5", optional: true},
         {:ex_aws_s3, "~> 2.5", optional: true},
         {:jason, "~> 1.4", optional: true},

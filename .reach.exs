@@ -70,9 +70,13 @@ infrastructure = [
   "PhoenixReplay.Storage",
   "PhoenixReplay.Storage.Ecto",
   "PhoenixReplay.Storage.Ecto.Migration",
+  "PhoenixReplay.Storage.EctoQuery",
   "PhoenixReplay.Storage.File",
   "PhoenixReplay.Storage.File.Index",
   "PhoenixReplay.Storage.S3",
+  "PhoenixReplay.Storage.S3Postgres",
+  "PhoenixReplay.Storage.S3Postgres.Migration",
+  "PhoenixReplay.Storage.S3Postgres.RepoStarter",
   "PhoenixReplay.Storage.Writer",
   "PhoenixReplay.Telemetry"
 ]

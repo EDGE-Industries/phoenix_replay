@@ -80,6 +80,46 @@ failed decode loads modules available on the code path once and retries, as
 file storage does. This loads existing library and application code, not module
 names supplied by stored data. Unknown atoms without code remain unreadable.
 
+## S3 and PostgreSQL metadata
+
+When an S3 archive grows beyond a small summary scan, keep the compressed
+recordings in S3 and put their searchable summaries in PostgreSQL:
+
+```elixir
+config :phoenix_replay,
+  storage: {
+    PhoenixReplay.Storage.S3Postgres,
+    repo: MyApp.ReplayRepo,
+    bucket: "my-replay-bucket",
+    prefix: "my-app/replays",
+    writer_node: "my-app-node-1"
+  }
+```
+
+Run `PhoenixReplay.Storage.S3Postgres.Migration.up()` from a migration in the
+replay database. The migration is PostgreSQL-specific. It stores event names
+as a text array and marks as JSONB, with GIN indexes for both. Rows are scoped
+by the S3 bucket and trimmed prefix, so storage namespaces can share a metadata
+database. Filters,
+facets, counts, histogram buckets and pagination for saved recordings run in
+SQL. Active sessions remain in the in-memory session catalog. Opening a row
+fetches its recording object from S3. The adapter writes the S3 object before
+the metadata row, so a failed database write leaves an object that a retry can
+replace; it publishes no incomplete metadata row.
+
+The text query uses case-insensitive substring predicates across each
+searchable field and does not require a PostgreSQL extension. Add `pg_trgm`
+indexes later if text search becomes a high-volume query.
+
+Clearing this backend deletes all S3 objects below its configured prefix and
+then removes that namespace's metadata rows.
+
+The replay repo can use the same PostgreSQL server as the application with a
+separate database and the `public` schema. If it is not already started by the
+host application, the adapter starts the configured repo before recovery runs.
+The consuming application must provide `ecto_sql`, `postgrex`, `ex_aws` and
+`ex_aws_s3`.
+
 ## Running sessions
 
 A running session is buffered in memory. With file storage, PhoenixReplay also writes it to disk in chunks while it runs, so its events leave memory however long it lasts, and a crash of the node loses at most the last few seconds:

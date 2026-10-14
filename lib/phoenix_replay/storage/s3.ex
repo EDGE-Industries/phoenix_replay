@@ -54,7 +54,9 @@ if Code.ensure_loaded?(ExAws.S3) do
 
       with :ok <- put(recording.id, "recording", Codec.encode(recording), opts),
            :ok <- put(recording.id, "summary", Codec.encode(summary), opts) do
-        delete_keys(object_keys(opts, partial_prefix(recording.id, opts), nil), opts)
+        with {:ok, keys} <- list_objects(opts, partial_prefix(recording.id, opts)) do
+          delete_objects(keys, opts)
+        end
       end
     end
 
@@ -89,29 +91,11 @@ if Code.ensure_loaded?(ExAws.S3) do
 
     @impl true
     def partials(opts) do
-      base = prefix(opts) <> "/partials/" <> writer_node(opts) <> "/"
-
-      object_keys(opts, base, nil)
-      |> Enum.map(fn key -> key |> String.replace_prefix(base, "") |> String.split("/") end)
-      |> Enum.flat_map(fn
-        [id, pid, _chunk] ->
-          if Recording.valid_id?(id) and valid_pid?(pid), do: [{id, pid}], else: []
-
-        _path ->
-          []
-      end)
-      |> Enum.uniq()
-      |> Enum.filter(fn {id, pid} ->
-        if pid == writer_pid(opts),
-          do: PhoenixReplay.Session.Buffer.config(id) == :error,
-          else: not Keyword.get(opts, :writer_alive?, &writer_alive?/1).(pid)
-      end)
-      |> Enum.map(&elem(&1, 0))
-      |> Enum.uniq()
+      partial_ids(opts)
       |> Enum.filter(fn id ->
         case request(ExAws.S3.head_object(bucket(opts), key(id, "summary", opts)), opts) do
           {:ok, _response} ->
-            case delete_keys(object_keys(opts, partial_prefix(id, opts), nil), opts) do
+            case delete_partial_chunks(id, opts) do
               :ok -> false
               {:error, reason} -> raise "Replay chunk cleanup failed: #{inspect(reason)}"
             end
@@ -140,6 +124,92 @@ if Code.ensure_loaded?(ExAws.S3) do
     @impl true
     def fetch(id, opts), do: get(id, "recording", Recording, opts)
 
+    @doc "Lists objects below a configured S3 key prefix."
+    def list_objects(opts, key_prefix), do: list_keys(opts, key_prefix, nil)
+
+    @doc "Deletes the supplied S3 object keys."
+    def delete_objects(keys, opts), do: delete_keys(keys, opts)
+
+    @doc "Deletes all partial chunks for a recording across writer nodes."
+    def delete_partial_chunks(id, opts) do
+      if not Recording.valid_id?(id), do: raise(ArgumentError, "Invalid replay recording id")
+
+      base = prefix(opts) <> "/partials/"
+
+      with {:ok, keys} <- list_objects(opts, base) do
+        keys
+        |> Enum.filter(&partial_key?(&1, base, id))
+        |> delete_objects(opts)
+      end
+    end
+
+    @doc "Returns completed recording IDs whose partial chunks are recoverable."
+    def partial_ids(opts) do
+      base = prefix(opts) <> "/partials/" <> writer_node(opts) <> "/"
+
+      object_keys(opts, base, nil)
+      |> Enum.map(fn key -> key |> String.replace_prefix(base, "") |> String.split("/") end)
+      |> Enum.flat_map(fn
+        [id, pid, _chunk] ->
+          if Recording.valid_id?(id) and valid_pid?(pid), do: [{id, pid}], else: []
+
+        _path ->
+          []
+      end)
+      |> Enum.uniq()
+      |> Enum.filter(fn {id, pid} ->
+        if pid == writer_pid(opts),
+          do: PhoenixReplay.Session.Buffer.config(id) == :error,
+          else: not Keyword.get(opts, :writer_alive?, &writer_alive?/1).(pid)
+      end)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.uniq()
+    end
+
+    @doc "Returns the storage namespace for a bucket and prefix."
+    def namespace(opts), do: prefix(opts) <> "|" <> bucket(opts)
+
+    @doc "Returns the normalized configured S3 prefix."
+    def prefix(opts), do: opts |> Keyword.fetch!(:prefix) |> String.trim("/")
+
+    @doc "Builds the S3 key for a complete recording object."
+    def recording_key(id, opts), do: key(id, "recording", opts)
+
+    @doc "Deletes one S3 object by key."
+    def delete_object(object_key, opts) do
+      bucket(opts)
+      |> ExAws.S3.delete_object(object_key)
+      |> request(opts)
+      |> result()
+    end
+
+    @doc "Returns the stable writer-node key used for partial storage."
+    def writer_node(opts) do
+      name = Keyword.get(opts, :writer_node)
+
+      if not is_binary(name) or String.trim(name) == "" do
+        raise ArgumentError,
+              "PhoenixReplay.Storage.S3 requires a non-empty :writer_node identity"
+      end
+
+      :crypto.hash(:sha256, name) |> Base.url_encode64(padding: false)
+    end
+
+    @doc "Stores a recording object without publishing an S3 summary."
+    @spec put_recording(Recording.t(), keyword()) :: :ok | {:error, term()}
+    def put_recording(%Recording{} = recording, opts),
+      do: put(recording.id, "recording", Codec.encode(recording), opts)
+
+    @doc "Fetches a recording object without requiring an S3 summary."
+    @spec fetch_recording(Recording.id(), keyword()) ::
+            {:ok, Recording.t()} | {:error, term()}
+    def fetch_recording(id, opts), do: get(id, "recording", Recording, opts)
+
+    @doc "Fetches a recording object from an exact stored S3 key."
+    @spec fetch_recording_key(String.t(), keyword()) ::
+            {:ok, Recording.t()} | {:error, term()}
+    def fetch_recording_key(object_key, opts), do: get_key(object_key, Recording, opts)
+
     @impl true
     def list(opts) do
       base = prefix(opts) <> "/summaries/"
@@ -165,18 +235,7 @@ if Code.ensure_loaded?(ExAws.S3) do
 
     @impl true
     def delete(id, opts) do
-      key(id, "summary", opts)
-      base = prefix(opts) <> "/partials/"
-
-      with {:ok, keys} <- list_keys(opts, base, nil),
-           chunks =
-             Enum.filter(keys, fn object_key ->
-               match?(
-                 [_node, ^id, _writer, _chunk],
-                 object_key |> String.replace_prefix(base, "") |> String.split("/")
-               )
-             end),
-           :ok <- delete_keys(chunks, opts),
+      with :ok <- delete_partial_chunks(id, opts),
            :ok <- remove(id, "summary", opts) do
         remove(id, "recording", opts)
       end
@@ -194,6 +253,13 @@ if Code.ensure_loaded?(ExAws.S3) do
           error -> {:halt, error}
         end
       end)
+    end
+
+    defp partial_key?(key, base, id) do
+      match?(
+        [_node, ^id, _writer, _chunk],
+        key |> String.replace_prefix(base, "") |> String.split("/")
+      )
     end
 
     defp fetch_chunks(id, opts) do
@@ -243,17 +309,6 @@ if Code.ensure_loaded?(ExAws.S3) do
 
     defp padded_sequence(sequence),
       do: sequence |> Integer.to_string() |> String.pad_leading(20, "0")
-
-    defp writer_node(opts) do
-      name = Keyword.get(opts, :writer_node)
-
-      if not is_binary(name) or String.trim(name) == "" do
-        raise ArgumentError,
-              "PhoenixReplay.Storage.S3 requires a non-empty :writer_node identity"
-      end
-
-      :crypto.hash(:sha256, name) |> Base.url_encode64(padding: false)
-    end
 
     defp writer_pid(opts), do: opts[:writer_pid] || List.to_string(:os.getpid())
     defp valid_pid?(pid), do: Regex.match?(~r/^[1-9][0-9]*$/, pid)
@@ -312,9 +367,11 @@ if Code.ensure_loaded?(ExAws.S3) do
     end
 
     defp get(id, extension, shape, opts) do
-      with {:ok, term} <- read_term(key(id, extension, opts), opts) do
-        decode_shape(term, shape)
-      end
+      get_key(key(id, extension, opts), shape, opts)
+    end
+
+    defp get_key(object_key, shape, opts) do
+      with {:ok, term} <- read_term(object_key, opts), do: decode_shape(term, shape)
     end
 
     defp decode_shape(%{__struct__: shape} = term, shape) do
@@ -354,7 +411,6 @@ if Code.ensure_loaded?(ExAws.S3) do
       "#{prefix(opts)}/#{directory}/#{id}.#{extension}"
     end
 
-    defp prefix(opts), do: opts |> Keyword.fetch!(:prefix) |> String.trim("/")
     defp bucket(opts), do: Keyword.fetch!(opts, :bucket)
     defp request(operation, opts), do: Keyword.get(opts, :request, &ExAws.request/1).(operation)
   end

@@ -19,6 +19,7 @@ defmodule PhoenixReplay.Storage do
     * `PhoenixReplay.Storage.File` — one file per recording on disk (default)
     * `PhoenixReplay.Storage.Ecto` — a database table via an Ecto repo
     * `PhoenixReplay.Storage.S3` — an S3-compatible object store
+    * `PhoenixReplay.Storage.S3Postgres` — recordings in S3 and summaries in PostgreSQL
 
   ## Configuration
 
