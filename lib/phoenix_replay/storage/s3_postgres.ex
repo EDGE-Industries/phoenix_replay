@@ -62,10 +62,14 @@ if Code.ensure_loaded?(Ecto.Query) and Code.ensure_loaded?(ExAws.S3) do
     @impl true
     def save(%Recording{} = recording, opts) do
       S3.writer_node(opts)
-      summary = Summary.new(recording, saved_at: System.system_time(:millisecond))
+      saved_at = Keyword.get(opts, :publication_saved_at, System.system_time(:millisecond))
+      summary = Summary.new(recording, saved_at: saved_at)
+
+      opts = Keyword.put(opts, :publication_saved_at, saved_at)
 
       with :ok <- S3.put_recording(recording, opts),
-           {:ok, _count} <- upsert(summary, opts) do
+           {:ok, _count} <- upsert(summary, opts),
+           :ok <- S3.delete_publication_checkpoint(recording.id, opts) do
         delete_chunks(recording.id, opts)
       end
     end
@@ -186,31 +190,43 @@ if Code.ensure_loaded?(Ecto.Query) and Code.ensure_loaded?(ExAws.S3) do
       do: S3.append(recording, chunk, opts)
 
     @impl true
-    def fetch_partial(id, opts), do: S3.fetch_partial(id, opts)
+    def fetch_partial(id, opts), do: S3.fetch_partial(id, opts, &fetch_completed/2)
 
     @impl true
     def partials(opts) do
       S3.partial_ids(opts)
       |> Enum.filter(fn id ->
-        if metadata_exists?(id, opts) do
-          case delete_chunks(id, opts) do
-            :ok -> false
-            {:error, reason} -> raise "Replay chunk cleanup failed: #{inspect(reason)}"
-          end
-        else
-          case S3.fetch_recording(id, opts) do
-            {:ok, recording} ->
-              case save(recording, opts) do
-                :ok -> false
-                {:error, reason} -> raise "Replay metadata recovery failed: #{inspect(reason)}"
-              end
+        case S3.fetch_publication_state(id, opts, &fetch_completed/2) do
+          {:ok, state, recording} ->
+            case state do
+              :published ->
+                if metadata_current?(recording, opts) do
+                  cleanup_partial(id, opts)
+                else
+                  case save(recording, opts) do
+                    :ok ->
+                      false
 
-            {:error, :not_found} ->
-              true
+                    {:error, reason} ->
+                      raise "Replay metadata recovery failed: #{inspect(reason)}"
+                  end
+                end
 
-            {:error, reason} ->
-              raise "Replay recording read failed: #{inspect(reason)}"
-          end
+              {:pending, saved_at} ->
+                case save(recording, Keyword.put(opts, :publication_saved_at, saved_at)) do
+                  :ok ->
+                    false
+
+                  {:error, reason} ->
+                    raise "Replay metadata recovery failed: #{inspect(reason)}"
+                end
+            end
+
+          {:error, :not_found} ->
+            true
+
+          {:error, reason} ->
+            raise "Replay recording read failed: #{inspect(reason)}"
         end
       end)
     end
@@ -326,8 +342,12 @@ if Code.ensure_loaded?(Ecto.Query) and Code.ensure_loaded?(ExAws.S3) do
       |> Summary.upgrade()
     end
 
-    defp metadata_exists?(id, opts),
-      do: not is_nil(metadata_object_key(id, opts))
+    defp fetch_completed(id, opts) do
+      case metadata_object_key(id, opts) do
+        nil -> S3.fetch_recording(id, opts)
+        object_key -> S3.fetch_recording_key(object_key, opts)
+      end
+    end
 
     defp metadata_object_key(id, opts) do
       repo(opts).one(
@@ -336,6 +356,35 @@ if Code.ensure_loaded?(Ecto.Query) and Code.ensure_loaded?(ExAws.S3) do
           select: r.object_key
         )
       )
+    end
+
+    defp metadata_current?(recording, opts) do
+      case metadata_summary(recording.id, opts) do
+        %Summary{} = summary ->
+          Summary.new(recording, saved_at: summary.saved_at, live?: summary.live?) == summary
+
+        nil ->
+          false
+      end
+    end
+
+    defp metadata_summary(id, opts) do
+      case repo(opts).one(
+             from(r in @table,
+               where: r.namespace == ^S3.namespace(opts) and r.id == ^id,
+               select: map(r, ^@summary_fields)
+             )
+           ) do
+        nil -> nil
+        row -> to_summary(row)
+      end
+    end
+
+    defp cleanup_partial(id, opts) do
+      case delete_chunks(id, opts) do
+        :ok -> false
+        {:error, reason} -> raise "Replay partial cleanup failed: #{inspect(reason)}"
+      end
     end
 
     defp delete_metadata(id, opts) do

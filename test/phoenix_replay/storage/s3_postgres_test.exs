@@ -80,6 +80,17 @@ defmodule PhoenixReplay.Storage.S3PostgresTest do
     )
 
     assert {:ok, ^recording} = S3Postgres.fetch("stored-key", context.opts)
+    assert [%Summary{saved_at: saved_at}] = S3Postgres.list(context.opts)
+    writer = Keyword.put(context.opts, :writer_pid, "12345")
+    assert :ok = S3Postgres.append(recording, [{0, hd(recording.events)}], writer)
+    reader = Keyword.merge(writer, writer_pid: "23456", writer_alive?: fn _pid -> false end)
+    config = PhoenixReplay.Config.load(storage: {S3Postgres, reader})
+
+    assert [] = PhoenixReplay.Session.Recovery.run(config)
+    assert {:ok, ^recording} = S3Postgres.fetch("stored-key", reader)
+    assert {:ok, ^recording} = S3Postgres.fetch_partial("stored-key", reader)
+    assert [%Summary{saved_at: ^saved_at}] = S3Postgres.list(reader)
+    assert Agent.get(context.store, &Map.keys/1) == [relocated]
     assert :ok = S3Postgres.delete("stored-key", context.opts)
     assert Agent.get(context.store, &Map.has_key?(&1, relocated)) == false
   end
@@ -96,6 +107,87 @@ defmodule PhoenixReplay.Storage.S3PostgresTest do
 
     assert :ok = S3Postgres.save(recording, context.opts)
     assert [%Summary{id: "retry"}] = S3Postgres.list(context.opts)
+  end
+
+  test "recovers metadata publication without any uploaded chunks", context do
+    opts = Keyword.merge(context.opts, writer_pid: "12345")
+    recording = Fixtures.counter_recording(id: "no-chunks")
+    failing = Keyword.put(opts, :repo, MetadataFailureRepo)
+
+    assert {:error, %DBConnection.ConnectionError{}} = S3Postgres.save(recording, failing)
+    assert [] = S3Postgres.list(opts)
+
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _ -> false end)
+    config = %PhoenixReplay.Config{storage: {S3Postgres, reader}}
+    assert [] = PhoenixReplay.Session.Recovery.run(config)
+    assert {:ok, ^recording} = S3Postgres.fetch(recording.id, reader)
+    assert [%Summary{id: "no-chunks"}] = S3Postgres.list(reader)
+    assert [] = PhoenixReplay.Session.Recovery.run(config)
+
+    assert Map.keys(Agent.get(context.store, & &1)) == [
+             "s3-postgres/recordings/no-chunks.recording"
+           ]
+  end
+
+  test "publishes completed checkpoints unchanged after a final object write failure", context do
+    opts = Keyword.merge(context.opts, writer_pid: "12345")
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _ -> false end)
+    fixture = Fixtures.counter_recording()
+
+    for events <- [[], fixture.events] do
+      recording = %{fixture | id: "checkpoint-#{length(events)}", events: events}
+
+      request = fn operation ->
+        if operation.http_method == :put and String.ends_with?(operation.path, ".recording"),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end
+
+      assert {:error, :timeout} =
+               S3Postgres.save(recording, Keyword.put(opts, :request, request))
+
+      config = %PhoenixReplay.Config{storage: {S3Postgres, reader}}
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+      assert {:ok, ^recording} = S3Postgres.fetch(recording.id, reader)
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+    end
+  end
+
+  test "failed replacements recover the newest checkpoint over existing SQL metadata", context do
+    fixture = Fixtures.counter_recording()
+
+    for failure <- [:recording, :metadata] do
+      original = %{fixture | id: Atom.to_string(failure), events: []}
+      assert :ok = S3Postgres.save(original, context.opts)
+
+      for {events, pid} <- [{Enum.take(fixture.events, 1), "12345"}, {fixture.events, "23456"}] do
+        replacement = %{original | events: events, url: "http://localhost/replacement"}
+        opts = Keyword.put(context.opts, :writer_pid, pid)
+
+        failing =
+          if failure == :metadata do
+            Keyword.put(opts, :repo, MetadataFailureRepo)
+          else
+            Keyword.put(opts, :request, fn operation ->
+              if operation.http_method == :put and String.ends_with?(operation.path, ".recording"),
+                do: {:error, :timeout},
+                else: opts[:request].(operation)
+            end)
+          end
+
+        assert {:error, _reason} = S3Postgres.save(replacement, failing)
+      end
+
+      reader = Keyword.merge(context.opts, writer_pid: "34567", writer_alive?: fn _ -> false end)
+      config = %PhoenixReplay.Config{storage: {S3Postgres, reader}}
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+      expected = %{original | events: fixture.events, url: "http://localhost/replacement"}
+      assert {:ok, ^expected} = S3Postgres.fetch(original.id, reader)
+      summary = Enum.find(S3Postgres.list(reader), &(&1.id == original.id))
+      assert summary.url == expected.url
+      assert summary.event_count == Summary.new(expected).event_count
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+    end
   end
 
   test "applies every filter and page in PostgreSQL without reading S3", context do
@@ -360,6 +452,55 @@ defmodule PhoenixReplay.Storage.S3PostgresTest do
 
     assert {:ok, %PhoenixReplay.Recording{id: "cleanup"}} =
              S3Postgres.fetch_partial("cleanup", reader)
+  end
+
+  test "partial cleanup preserves metadata time bounds", context do
+    opts = Keyword.merge(context.opts, writer_pid: "12345")
+    recording = Fixtures.counter_recording(id: "cleanup-stable")
+    event = %Event{at: 10, type: :event, data: %{name: "late", params: %{}}}
+
+    assert :ok = S3Postgres.append(recording, [{0, event}], opts)
+
+    failing =
+      Keyword.put(opts, :request, fn operation ->
+        if operation.http_method == :delete and String.ends_with?(operation.path, ".chunk"),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end)
+
+    assert {:error, :timeout} = S3Postgres.save(recording, failing)
+    assert [%Summary{saved_at: saved_at}] = S3Postgres.list(opts)
+
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _pid -> false end)
+    assert [] = S3Postgres.partials(reader)
+    assert [%Summary{saved_at: ^saved_at}] = S3Postgres.list(reader)
+
+    for page_bound <- [since: saved_at - 1, until: saved_at] do
+      {[summary], 1} =
+        S3Postgres.query(%Filter{}, [page_bound, {:now, saved_at + 1}, {:limit, 10}], reader)
+
+      assert summary.id == "cleanup-stable"
+      assert summary.saved_at == saved_at
+    end
+  end
+
+  test "checkpoint cleanup retries keep the original publication time", context do
+    opts = Keyword.put(context.opts, :writer_pid, "12345")
+
+    failing =
+      Keyword.put(opts, :request, fn operation ->
+        if operation.http_method == :delete and String.ends_with?(operation.path, ".pending"),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end)
+
+    recording = Fixtures.counter_recording(id: "checkpoint-time")
+    assert {:error, :timeout} = S3Postgres.save(recording, failing)
+    assert [%Summary{saved_at: saved_at}] = S3Postgres.list(opts)
+
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _pid -> false end)
+    assert [] = S3Postgres.partials(reader)
+    assert [%Summary{saved_at: ^saved_at}] = S3Postgres.list(reader)
   end
 
   test "delete and clear keep other storage namespaces", context do

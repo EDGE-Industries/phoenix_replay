@@ -69,11 +69,23 @@ The adapter writes recordings below `recordings/`, summaries below
 `summaries/`, and running-session chunks below `partials/` under the prefix.
 It lists and reads summaries for the dashboard, stores chunks as immutable
 objects, and retries publication during recovery when a completed recording has
-no summary. It uses `&ExAws.request/1` by default; pass an equivalent request
+no summary. Before final publication, it writes a compressed full-recording
+checkpoint below `partials/`. This checkpoint makes publication recoverable
+even when no periodic chunk was uploaded, including with `flush: false`.
+It removes the checkpoint after publication succeeds. It uses `&ExAws.request/1`
+by default; pass an equivalent request
 function in tests and custom clients. Configure credentials, regions and
 endpoints through ExAws. Set `writer_node` to a non-empty identity that is
 unique per node and stable across restarts. The adapter hashes this identity
 into the partial-object path so recovery does not mix writers.
+
+The recorder gives each session a unique ID and one writer. Each recording has
+one pending checkpoint per writer node, so a new save replaces an older failed
+attempt. Recovery treats this checkpoint as authoritative, publishes it unchanged
+before using existing recording or summary data, and removes it before chunk
+cleanup. Retries reuse the checkpoint's publication timestamp. Cleanup of an
+already published recording preserves its metadata. This also covers failed
+replacements of an existing ID.
 
 Reads use the shared codec to decode non-executable terms. On a cold node, a
 failed decode loads modules available on the code path once and retries, as
@@ -104,8 +116,9 @@ database. Filters,
 facets, counts, histogram buckets and pagination for saved recordings run in
 SQL. Active sessions remain in the in-memory session catalog. Opening a row
 fetches its recording object from S3. The adapter writes the S3 object before
-the metadata row, so a failed database write leaves an object that a retry can
-replace; it publishes no incomplete metadata row.
+the metadata row, so a failed database write leaves a recording and publication
+checkpoint for recovery; it publishes no incomplete metadata row. Successful
+publication removes the checkpoint and partial chunks.
 
 The text query uses case-insensitive substring predicates across each
 searchable field and does not require a PostgreSQL extension. Add `pg_trgm`

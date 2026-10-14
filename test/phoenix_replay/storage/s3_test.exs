@@ -34,6 +34,92 @@ defmodule PhoenixReplay.Storage.S3Test do
     end
   end
 
+  test "equal start times are ordered by descending recording ID", context do
+    for id <- ["a", "b", "c"] do
+      assert :ok = S3.save(%{context.recording | id: id}, context.opts)
+    end
+
+    assert Enum.map(S3.list(context.opts), & &1.id) == ["c", "b", "a"]
+  end
+
+  test "publication failures without chunks survive a writer restart", context do
+    opts = Keyword.merge(context.opts, writer_pid: "12345")
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _ -> false end)
+
+    for extension <- [".recording", ".summary"],
+        events <- [[], [%Event{type: :mount, at: 0, data: %{assigns: %{}}}]] do
+      id = String.trim_leading(extension, ".") <> Integer.to_string(length(events))
+      recording = %{context.recording | id: id, events: events}
+
+      request = fn operation ->
+        if operation.http_method == :put and String.ends_with?(operation.path, extension),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end
+
+      assert {:error, :timeout} = S3.save(recording, Keyword.put(opts, :request, request))
+      refute Enum.any?(S3.list(opts), &(&1.id == id))
+      config = %PhoenixReplay.Config{storage: {S3, reader}}
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+      assert {:ok, ^recording} = S3.fetch(id, reader)
+      assert Enum.any?(S3.list(reader), &(&1.id == id))
+      assert [] = PhoenixReplay.Session.Recovery.run(config)
+
+      refute Enum.any?(
+               Map.keys(Agent.get(context.store, & &1)),
+               &String.ends_with?(&1, ".pending")
+             )
+    end
+  end
+
+  test "a failed checkpoint never writes the recording or summary", context do
+    request = fn operation ->
+      assert String.ends_with?(operation.path, ".pending")
+      {:error, :timeout}
+    end
+
+    assert {:error, :timeout} =
+             S3.save(context.recording, Keyword.put(context.opts, :request, request))
+
+    assert Agent.get(context.store, & &1) == %{}
+  end
+
+  test "failed replacements recover the newest checkpoint over existing summary data", context do
+    event = %Event{type: :mount, at: 0, data: %{assigns: %{count: 1}}}
+    later = %Event{type: :event, at: 10, data: %{name: "updated", params: %{}}}
+
+    for extension <- [".recording", ".summary"] do
+      original = %{context.recording | id: String.trim_leading(extension, ".")}
+      assert :ok = S3.save(original, context.opts)
+
+      for {events, pid} <- [{[event], "12345"}, {[event, later], "23456"}] do
+        replacement = %{original | events: events, url: "http://localhost/updated"}
+        opts = Keyword.put(context.opts, :writer_pid, pid)
+
+        request = fn operation ->
+          if operation.http_method == :put and String.ends_with?(operation.path, extension),
+            do: {:error, :timeout},
+            else: opts[:request].(operation)
+        end
+
+        assert {:error, :timeout} = S3.save(replacement, Keyword.put(opts, :request, request))
+      end
+
+      reader = Keyword.merge(context.opts, writer_pid: "34567", writer_alive?: fn _ -> false end)
+      assert [] = PhoenixReplay.Session.Recovery.run(%PhoenixReplay.Config{storage: {S3, reader}})
+      expected = %{original | events: [event, later], url: "http://localhost/updated"}
+      assert {:ok, ^expected} = S3.fetch(original.id, reader)
+      summary = Enum.find(S3.list(reader), &(&1.id == original.id))
+      assert summary.url == expected.url
+      assert summary.event_count == Summary.new(expected).event_count
+
+      refute Enum.any?(
+               Map.keys(Agent.get(context.store, & &1)),
+               &String.ends_with?(&1, ".pending")
+             )
+    end
+  end
+
   test "listing skips non-canonical summary object keys", context do
     assert :ok = S3.save(context.recording, context.opts)
 
@@ -143,13 +229,14 @@ defmodule PhoenixReplay.Storage.S3Test do
   end
 
   test "failed recording writes never publish a summary", context do
-    request = fn operation ->
-      assert operation.path == "replay-trial/recordings/trial.recording"
-      {:error, :timeout}
+    request = fn
+      %{http_method: :put, path: "replay-trial/recordings/trial.recording"} -> {:error, :timeout}
+      operation -> context.opts[:request].(operation)
     end
 
     opts = Keyword.put(context.opts, :request, request)
     assert {:error, :timeout} = S3.save(context.recording, opts)
+    assert [] = S3.list(context.opts)
   end
 
   test "failed summary writes can be retried", context do
@@ -353,6 +440,20 @@ defmodule PhoenixReplay.Storage.S3Test do
              S3.fetch_partial("other", Keyword.put(opts, :writer_node, "other-node"))
   end
 
+  test "a live writer keeps an id with stale chunks out of recovery", context do
+    opts = Keyword.merge(context.opts, writer_node: "test-node", writer_pid: "12345")
+    event = %Event{type: :event, at: 10, data: %{name: "increment", params: %{}}}
+    assert :ok = S3.append(context.recording, [{0, event}], opts)
+
+    assert :ok =
+             S3.append(context.recording, [{0, event}], Keyword.put(opts, :writer_pid, "23456"))
+
+    reader = Keyword.merge(opts, writer_pid: "34567", writer_alive?: fn pid -> pid == "12345" end)
+    assert [] = S3.partials(reader)
+
+    assert ["trial"] = S3.partials(Keyword.put(reader, :writer_alive?, fn _pid -> false end))
+  end
+
   test "late chunks cannot replace a completed recording during recovery", context do
     opts = Keyword.merge(context.opts, writer_node: "test-node", writer_pid: "12345")
     event = %Event{type: :event, at: 10, data: %{name: "increment", params: %{}}}
@@ -413,6 +514,44 @@ defmodule PhoenixReplay.Storage.S3Test do
     config = %PhoenixReplay.Config{storage: {S3, reader}}
     assert [] = PhoenixReplay.Session.Recovery.run(config)
     assert {:error, :not_found} = S3.fetch("trial", opts)
+  end
+
+  test "partial cleanup does not rewrite a published summary", context do
+    opts = Keyword.merge(context.opts, writer_node: "test-node", writer_pid: "12345")
+    event = %Event{type: :event, at: 10, data: %{name: "increment", params: %{}}}
+    assert :ok = S3.append(context.recording, [{0, event}], opts)
+
+    failing =
+      Keyword.put(opts, :request, fn operation ->
+        if operation.http_method == :delete and String.ends_with?(operation.path, ".chunk"),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end)
+
+    assert {:error, :timeout} = S3.save(context.recording, failing)
+    assert [%Summary{saved_at: saved_at}] = S3.list(opts)
+
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _pid -> false end)
+    assert [] = S3.partials(reader)
+    assert [%Summary{saved_at: ^saved_at}] = S3.list(reader)
+  end
+
+  test "checkpoint cleanup retries keep the original publication time", context do
+    opts = Keyword.merge(context.opts, writer_node: "test-node", writer_pid: "12345")
+
+    failing =
+      Keyword.put(opts, :request, fn operation ->
+        if operation.http_method == :delete and String.ends_with?(operation.path, ".pending"),
+          do: {:error, :timeout},
+          else: opts[:request].(operation)
+      end)
+
+    assert {:error, :timeout} = S3.save(context.recording, failing)
+    assert [%Summary{saved_at: saved_at}] = S3.list(opts)
+
+    reader = Keyword.merge(opts, writer_pid: "23456", writer_alive?: fn _pid -> false end)
+    assert [] = S3.partials(reader)
+    assert [%Summary{saved_at: ^saved_at}] = S3.list(reader)
   end
 
   test "bad chunks and failed writes do not report success", context do

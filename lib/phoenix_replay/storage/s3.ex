@@ -50,10 +50,14 @@ if Code.ensure_loaded?(ExAws.S3) do
     @impl true
     def save(%Recording{} = recording, opts) do
       writer_node(opts)
-      summary = Summary.new(recording, saved_at: System.system_time(:millisecond))
+      saved_at = Keyword.get(opts, :publication_saved_at, System.system_time(:millisecond))
+      summary = Summary.new(recording, saved_at: saved_at)
 
-      with :ok <- put(recording.id, "recording", Codec.encode(recording), opts),
-           :ok <- put(recording.id, "summary", Codec.encode(summary), opts) do
+      opts = Keyword.put(opts, :publication_saved_at, saved_at)
+
+      with :ok <- put_recording(recording, opts),
+           :ok <- put(recording.id, "summary", Codec.encode(summary), opts),
+           :ok <- delete_publication_checkpoint(recording.id, opts) do
         with {:ok, keys} <- list_objects(opts, partial_prefix(recording.id, opts)) do
           delete_objects(keys, opts)
         end
@@ -81,9 +85,9 @@ if Code.ensure_loaded?(ExAws.S3) do
     def append(_recording, _chunk, _opts), do: {:error, :invalid_chunk}
 
     @impl true
-    def fetch_partial(id, opts) do
-      case fetch(id, opts) do
-        {:ok, recording} -> {:ok, recording}
+    def fetch_partial(id, opts, fetch_completed \\ &fetch_recording/2) do
+      case fetch_publication_state(id, opts, fetch_completed) do
+        {:ok, _state, recording} -> {:ok, recording}
         {:error, :not_found} -> fetch_chunks(id, opts)
         error -> error
       end
@@ -93,30 +97,37 @@ if Code.ensure_loaded?(ExAws.S3) do
     def partials(opts) do
       partial_ids(opts)
       |> Enum.filter(fn id ->
-        case request(ExAws.S3.head_object(bucket(opts), key(id, "summary", opts)), opts) do
-          {:ok, _response} ->
-            case delete_partial_chunks(id, opts) do
-              :ok -> false
-              {:error, reason} -> raise "Replay chunk cleanup failed: #{inspect(reason)}"
-            end
+        case fetch_publication_state(id, opts) do
+          {:ok, state, recording} ->
+            case state do
+              :published ->
+                if publication_current?(recording, opts) do
+                  cleanup_partial(id, opts)
+                else
+                  case save(recording, opts) do
+                    :ok ->
+                      false
 
-          {:error, {:http_error, 404, _}} ->
-            case fetch(id, opts) do
-              {:ok, recording} ->
-                case save(recording, opts) do
-                  :ok -> false
-                  {:error, reason} -> raise "Replay publication retry failed: #{inspect(reason)}"
+                    {:error, reason} ->
+                      raise "Replay publication retry failed: #{inspect(reason)}"
+                  end
                 end
 
-              {:error, :not_found} ->
-                true
+              {:pending, saved_at} ->
+                case save(recording, Keyword.put(opts, :publication_saved_at, saved_at)) do
+                  :ok ->
+                    false
 
-              {:error, reason} ->
-                raise "Replay recording read failed: #{inspect(reason)}"
+                  {:error, reason} ->
+                    raise "Replay publication retry failed: #{inspect(reason)}"
+                end
             end
 
+          {:error, :not_found} ->
+            true
+
           {:error, reason} ->
-            raise "Replay recovery check failed: #{inspect(reason)}"
+            raise "Replay recording read failed: #{inspect(reason)}"
         end
       end)
     end
@@ -143,13 +154,24 @@ if Code.ensure_loaded?(ExAws.S3) do
       end
     end
 
-    @doc "Returns completed recording IDs whose partial chunks are recoverable."
+    @doc "Returns recoverable recording IDs for this writer node."
     def partial_ids(opts) do
       base = prefix(opts) <> "/partials/" <> writer_node(opts) <> "/"
 
       object_keys(opts, base, nil)
       |> Enum.map(fn key -> key |> String.replace_prefix(base, "") |> String.split("/") end)
       |> Enum.flat_map(fn
+        [id, "publication.pending"] ->
+          if Recording.valid_id?(id) do
+            case read_checkpoint(id, opts) do
+              {:ok, pid, _saved_at, _body} -> [{id, pid}]
+              {:error, :not_found} -> []
+              {:error, reason} -> raise "Replay checkpoint read failed: #{inspect(reason)}"
+            end
+          else
+            []
+          end
+
         [id, pid, _chunk] ->
           if Recording.valid_id?(id) and valid_pid?(pid), do: [{id, pid}], else: []
 
@@ -157,10 +179,9 @@ if Code.ensure_loaded?(ExAws.S3) do
           []
       end)
       |> Enum.uniq()
-      |> Enum.filter(fn {id, pid} ->
-        if pid == writer_pid(opts),
-          do: PhoenixReplay.Session.Buffer.config(id) == :error,
-          else: not Keyword.get(opts, :writer_alive?, &writer_alive?/1).(pid)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.filter(fn {id, pids} ->
+        Enum.all?(pids, &writer_stopped?(id, &1, opts))
       end)
       |> Enum.map(&elem(&1, 0))
       |> Enum.uniq()
@@ -183,6 +204,10 @@ if Code.ensure_loaded?(ExAws.S3) do
       |> result()
     end
 
+    @doc "Removes a writer node's pending publication after metadata is saved."
+    def delete_publication_checkpoint(id, opts),
+      do: delete_object(publication_key(id, opts), opts)
+
     @doc "Returns the stable writer-node key used for partial storage."
     def writer_node(opts) do
       name = Keyword.get(opts, :writer_node)
@@ -195,15 +220,62 @@ if Code.ensure_loaded?(ExAws.S3) do
       :crypto.hash(:sha256, name) |> Base.url_encode64(padding: false)
     end
 
-    @doc "Stores a recording object without publishing an S3 summary."
+    @doc "Stores a publication checkpoint and recording without publishing an S3 summary."
     @spec put_recording(Recording.t(), keyword()) :: :ok | {:error, term()}
-    def put_recording(%Recording{} = recording, opts),
-      do: put(recording.id, "recording", Codec.encode(recording), opts)
+    def put_recording(%Recording{} = recording, opts) do
+      body = Codec.encode(recording)
+
+      checkpoint = publication_key(recording.id, opts)
+
+      saved_at = Keyword.get(opts, :publication_saved_at, System.system_time(:millisecond))
+
+      operation =
+        ExAws.S3.put_object(
+          bucket(opts),
+          checkpoint,
+          :erlang.term_to_binary({writer_pid(opts), saved_at, body}),
+          content_type: "application/octet-stream"
+        )
+
+      with :ok <- operation |> request(opts) |> result(),
+           do: put(recording.id, "recording", body, opts)
+    end
 
     @doc "Fetches a recording object without requiring an S3 summary."
     @spec fetch_recording(Recording.id(), keyword()) ::
             {:ok, Recording.t()} | {:error, term()}
     def fetch_recording(id, opts), do: get(id, "recording", Recording, opts)
+
+    @doc "Fetches a completed recording or its pending publication checkpoint."
+    def fetch_publication(id, opts) do
+      case fetch_publication_state(id, opts) do
+        {:ok, _state, recording} -> {:ok, recording}
+        error -> error
+      end
+    end
+
+    @doc "Fetches publication state, using the adapter's lookup for completed recordings."
+    def fetch_publication_state(id, opts, fetch_completed \\ &fetch_recording/2) do
+      case read_checkpoint(id, opts) do
+        {:ok, _pid, saved_at, body} ->
+          with {:ok, term} <- Codec.decode_non_executable(body),
+               {:ok, %Recording{id: ^id} = recording} <- decode_shape(term, Recording) do
+            {:ok, {:pending, saved_at}, recording}
+          else
+            {:ok, _other_recording} -> {:error, :undecodable}
+            error -> error
+          end
+
+        {:error, :not_found} ->
+          case fetch_completed.(id, opts) do
+            {:ok, recording} -> {:ok, :published, recording}
+            error -> error
+          end
+
+        error ->
+          error
+      end
+    end
 
     @doc "Fetches a recording object from an exact stored S3 key."
     @spec fetch_recording_key(String.t(), keyword()) ::
@@ -230,7 +302,7 @@ if Code.ensure_loaded?(ExAws.S3) do
           []
         end
       end)
-      |> Enum.sort_by(& &1.connected_at, :desc)
+      |> Summary.sort()
     end
 
     @impl true
@@ -257,13 +329,34 @@ if Code.ensure_loaded?(ExAws.S3) do
 
     defp partial_key?(key, base, id) do
       match?(
-        [_node, ^id, _writer, _chunk],
+        [_node, ^id | _rest],
         key |> String.replace_prefix(base, "") |> String.split("/")
       )
     end
 
+    defp cleanup_partial(id, opts) do
+      case delete_partial_chunks(id, opts) do
+        :ok -> false
+        {:error, reason} -> raise "Replay partial cleanup failed: #{inspect(reason)}"
+      end
+    end
+
+    defp publication_current?(recording, opts) do
+      case get(recording.id, "summary", Summary, opts) do
+        {:ok, summary} ->
+          Summary.new(recording, saved_at: summary.saved_at, live?: summary.live?) == summary
+
+        {:error, :not_found} ->
+          false
+
+        {:error, reason} ->
+          raise "Replay summary read failed: #{inspect(reason)}"
+      end
+    end
+
     defp fetch_chunks(id, opts) do
       object_keys(opts, partial_prefix(id, opts), nil)
+      |> Enum.reject(&(Path.basename(&1) == "publication.pending"))
       |> Enum.sort_by(&Path.basename/1)
       |> Enum.reduce_while({:error, :not_found}, fn key, accumulated ->
         with {:ok, {%Recording{id: ^id} = recording, chunk}} <- read_term(key, opts),
@@ -281,6 +374,22 @@ if Code.ensure_loaded?(ExAws.S3) do
         end
       end)
       |> complete_partial()
+    end
+
+    defp publication_key(id, opts), do: partial_prefix(id, opts) <> "publication.pending"
+
+    defp read_checkpoint(id, opts) do
+      case read_term(publication_key(id, opts), opts) do
+        {:ok, {pid, saved_at, body}}
+        when is_binary(pid) and is_integer(saved_at) and saved_at >= 0 and is_binary(body) ->
+          if valid_pid?(pid), do: {:ok, pid, saved_at, body}, else: {:error, :undecodable}
+
+        {:ok, _invalid} ->
+          {:error, :undecodable}
+
+        error ->
+          error
+      end
     end
 
     defp complete_partial({:ok, recording, events}) do
@@ -327,6 +436,12 @@ if Code.ensure_loaded?(ExAws.S3) do
             do: status != 0 or String.contains?(output, " #{pid} "),
             else: status == 0 or String.contains?(output, "not permitted")
       end
+    end
+
+    defp writer_stopped?(id, pid, opts) do
+      if pid == writer_pid(opts),
+        do: PhoenixReplay.Session.Buffer.config(id) == :error,
+        else: not Keyword.get(opts, :writer_alive?, &writer_alive?/1).(pid)
     end
 
     defp object_keys(opts, key_prefix, token) do
