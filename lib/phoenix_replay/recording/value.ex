@@ -12,6 +12,7 @@ defmodule PhoenixReplay.Recording.Value do
     Decimal,
     MapSet,
     NaiveDateTime,
+    PhoenixReplay.Recording.Value.Callback,
     Range,
     Regex,
     Time,
@@ -20,7 +21,7 @@ defmodule PhoenixReplay.Recording.Value do
   ]
 
   @doc """
-  Standard-library structs taken whole: kept as they are by
+  Structs taken whole: kept as they are by
   `PhoenixReplay.Sanitizer.Default`, and compared whole when the player
   shows what changed. `PhoenixReplay.Redactor` looks inside `URI`, whose
   path and query hold whatever was typed into them.

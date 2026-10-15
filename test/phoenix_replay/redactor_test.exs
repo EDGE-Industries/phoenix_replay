@@ -24,6 +24,13 @@ defmodule PhoenixReplay.RedactorTest do
     defstruct [:number, :note]
   end
 
+  test "keeps non-executable callback identities unchanged" do
+    callback = PhoenixReplay.Recording.Value.Callback.from_function(&Enum.count/1)
+
+    assert Redactor.redact_term(%{callback: callback}, {Patterns, patterns: [~r/./s]}) ==
+             {:ok, %{callback: callback}}
+  end
+
   test "redacts strings inside maps, lists, tuples and structs, keeping keys and types" do
     date = ~D[2026-01-01]
 

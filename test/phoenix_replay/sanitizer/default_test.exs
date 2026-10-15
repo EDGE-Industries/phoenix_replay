@@ -66,6 +66,67 @@ defmodule PhoenixReplay.Sanitizer.DefaultTest do
              Default.sanitize_params(values)
   end
 
+  test "keeps assign metadata shape while filtering nested sensitive values" do
+    values = %{
+      password_field: :password,
+      hashed_password_field: :hashed_password,
+      sign_in_token_params: %{token: "secret-token", remember_me: true},
+      password: "secret-password",
+      token: false,
+      secret: nil
+    }
+
+    assert %{
+             password_field: :password,
+             hashed_password_field: :hashed_password,
+             sign_in_token_params: %{token: "[FILTERED]", remember_me: true},
+             password: "[FILTERED]",
+             token: false,
+             secret: nil
+           } = Default.sanitize_assigns(values)
+
+    assert %{
+             password_field: "[FILTERED]",
+             sign_in_token_params: "[FILTERED]",
+             token: "[FILTERED]"
+           } = Default.sanitize_params(values)
+  end
+
+  test "preserves atom action selectors without retaining atom secret payloads" do
+    values = %{token_action_name: :refresh_token, password: :literal_secret}
+
+    assert Default.sanitize_assigns(values) == %{
+             token_action_name: :refresh_token,
+             password: "[FILTERED]"
+           }
+
+    assert Default.sanitize_params(values) == %{
+             token_action_name: "[FILTERED]",
+             password: "[FILTERED]"
+           }
+  end
+
+  test "sensitive assign containers mask payloads even under neutral nested keys" do
+    assigns = %{
+      credential_params: %{value: "secret", nested: [%{value: "another"}], present: true}
+    }
+
+    assert Default.sanitize_assigns(assigns) == %{
+             credential_params: %{
+               value: "[FILTERED]",
+               nested: [%{value: "[FILTERED]"}],
+               present: true
+             }
+           }
+  end
+
+  test "sensitive assign containers keep struct types while masking their fields" do
+    assert Default.sanitize_assigns(%{
+             credential_params: %Account{name: "secret", api_key: "key"}
+           }) ==
+             %{credential_params: %Account{name: "[FILTERED]", api_key: "[FILTERED]"}}
+  end
+
   test "recurses into structs, lists and tuples" do
     account = %Account{name: "n", api_key: "k", profile: %{secret_answer: "s"}}
 

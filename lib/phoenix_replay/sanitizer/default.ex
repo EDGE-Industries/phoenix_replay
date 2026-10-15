@@ -6,6 +6,10 @@ defmodule PhoenixReplay.Sanitizer.Default do
       `secret`, `api_key`, `private_key`, `credential`, `card_number`,
       `credit_card` or `one_time` with `"[FILTERED]"`. Keys are kept so
       recorded templates still find them.
+    * In assigns, keeps `nil` and boolean values under sensitive keys, atom
+      values for sensitive field and action selectors ending in `_field` or
+      `_action_name`, and the shape of sensitive
+      maps ending in `_params` while masking their payload values.
     * In params, which include what users type into form controls, also
       filters keys that have `cvv`, `cvc`, `csc`, `ssn`, `pin` or `otp` as
       a word of their own, such as `card_cvv` or `pinCode` but not
@@ -76,9 +80,42 @@ defmodule PhoenixReplay.Sanitizer.Default do
 
   defp sanitize_map(map, words?) do
     Map.new(map, fn {key, value} ->
-      if sensitive?(key, words?), do: {key, @filtered}, else: {key, sanitize(value, words?)}
+      if sensitive?(key, words?) do
+        {key, sanitize_sensitive(key, value, words?)}
+      else
+        {key, sanitize(value, words?)}
+      end
     end)
   end
+
+  defp sanitize_sensitive(_key, _value, true), do: @filtered
+
+  defp sanitize_sensitive(key, value, false) do
+    cond do
+      is_nil(value) or is_boolean(value) -> value
+      is_atom(value) and (suffix?(key, "_field") or suffix?(key, "_action_name")) -> value
+      is_map(value) and suffix?(key, "_params") -> sanitize_payload(value)
+      true -> @filtered
+    end
+  end
+
+  defp sanitize_payload(value) when is_nil(value) or is_boolean(value), do: value
+
+  defp sanitize_payload(%module{} = value) do
+    value |> Map.from_struct() |> sanitize_payload() |> Map.put(:__struct__, module)
+  end
+
+  defp sanitize_payload(map) when is_map(map),
+    do: Map.new(Map.to_list(map), fn {key, value} -> {key, sanitize_payload(value)} end)
+
+  defp sanitize_payload(list) when is_list(list), do: Enum.map(list, &sanitize_payload/1)
+  defp sanitize_payload(_value), do: @filtered
+
+  defp suffix?(key, suffix) when is_atom(key),
+    do: key |> Atom.to_string() |> String.ends_with?(suffix)
+
+  defp suffix?(key, suffix) when is_binary(key), do: String.ends_with?(key, suffix)
+  defp suffix?(_key, _suffix), do: false
 
   # It runs for every key of every recorded assign, so it matches every name
   # in one pass, and looks for word boundaries only when a short name occurs.

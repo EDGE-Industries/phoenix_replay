@@ -2,6 +2,7 @@ defmodule PhoenixReplay.Sanitizer.SerializableTest do
   use ExUnit.Case, async: true
 
   alias PhoenixReplay.Sanitizer.Serializable
+  alias PhoenixReplay.Recording.Value.Callback
 
   defmodule Account do
     defstruct [:name, :callback]
@@ -24,13 +25,14 @@ defmodule PhoenixReplay.Sanitizer.SerializableTest do
       nested: [%{runtime: self()}, {:ok, &Enum.count/1}]
     }
 
-    assert %{function: nil, pid: nil, port: nil, reference: nil} =
+    assert %{function: %Callback{arity: 1}, pid: nil, port: nil, reference: nil} =
              Serializable.sanitize_assigns(values)
 
-    assert %Account{name: "n", callback: nil} =
+    assert %Account{name: "n", callback: %Callback{arity: 1}} =
              Serializable.sanitize_assigns(values).account
 
-    assert [%{runtime: nil}, {:ok, nil}] = Serializable.sanitize_assigns(values).nested
+    assert [%{runtime: nil}, {:ok, %Callback{arity: 1}}] =
+             Serializable.sanitize_assigns(values).nested
   end
 
   test "keeps forms as forms while removing runtime values from their fields" do
@@ -38,7 +40,7 @@ defmodule PhoenixReplay.Sanitizer.SerializableTest do
     %{form: sanitized} = Serializable.sanitize_assigns(%{form: form})
 
     assert %Phoenix.HTML.Form{} = sanitized
-    assert sanitized.source["callback"] == nil
+    assert sanitized.source["callback"] == Callback.from_function(&Enum.count/1)
     assert sanitized.options == []
   end
 
@@ -51,5 +53,21 @@ defmodule PhoenixReplay.Sanitizer.SerializableTest do
     assert sanitized.timestamp == now
     assert {:ok, %{nested: {:timestamp, %DateTime{} = nested}}} = sanitized.result
     assert nested == now
+  end
+
+  test "keeps replay metadata while filtering nested secrets" do
+    values = %{
+      password_field: :password,
+      sign_in_token_params: %{token: "secret-token", remember_me: false},
+      password: "secret-password",
+      callback: &Enum.count/1
+    }
+
+    assert %{
+             password_field: :password,
+             sign_in_token_params: %{token: "[FILTERED]", remember_me: false},
+             password: "[FILTERED]",
+             callback: %Callback{arity: 1}
+           } = Serializable.sanitize_assigns(values)
   end
 end

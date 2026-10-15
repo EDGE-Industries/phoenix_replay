@@ -174,8 +174,8 @@ defmodule PhoenixReplay.Web.Live.Frame do
     |> assign(Map.new(previous_keys -- keys, &{&1, nil}))
     |> assign(recorded)
     |> replace_flash(flash)
-    |> update(@private, &%{&1 | components: states})
     |> refresh_components(states)
+    |> update(@private, &%{&1 | components: states})
     |> put_private(@private, %{private | timeline: timeline, keys: keys})
     |> check_render()
     |> push_inputs(State.inputs(timeline.assigns[State.assign()]))
@@ -263,7 +263,9 @@ defmodule PhoenixReplay.Web.Live.Frame do
   # they get their recorded assigns directly.
   defp refresh_components(socket, states) do
     if connected?(socket) do
-      Enum.each(states, fn {{module, id}, _assigns} ->
+      previous = socket.assigns[@private].components
+
+      Enum.each(Enum.uniq(Map.keys(previous) ++ Map.keys(states)), fn {module, id} ->
         send_update(ReplayComponent, id: {module, id}, __replay_states__: states)
       end)
     end
@@ -287,7 +289,7 @@ defmodule PhoenixReplay.Web.Live.Frame do
   end
 
   defp fill_unrecorded(socket, frame, unrecorded) do
-    case Rendering.render_check(frame.view, socket.assigns, layout: frame.layout) do
+    case Rendering.render_check(frame.view, render_assigns(socket), layout: frame.layout) do
       :ok ->
         {socket, unrecorded, nil}
 
@@ -299,6 +301,15 @@ defmodule PhoenixReplay.Web.Live.Frame do
       {:error, description} ->
         {socket, unrecorded, description}
     end
+  end
+
+  defp render_assigns(%{assigns: assigns} = socket) do
+    socket = %{
+      socket
+      | assigns: %Phoenix.LiveView.Socket.AssignsNotInSocket{__assigns__: assigns}
+    }
+
+    Map.put(assigns, :socket, socket)
   end
 
   defp tell_unrecorded(%{private: %{@channel => channel}} = socket, unrecorded)

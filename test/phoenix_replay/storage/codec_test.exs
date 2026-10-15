@@ -68,7 +68,11 @@ defmodule PhoenixReplay.Storage.CodecTest do
   end
 
   test "non-executable decoding keeps data and rejects functions and unknown atoms" do
-    term = %{saved: [nil, {1, "two"}]}
+    term = %{
+      saved: [nil, {1, "two"}],
+      callback: PhoenixReplay.Recording.Value.Callback.from_function(&Map.get/2)
+    }
+
     assert {:ok, ^term} = Codec.decode_non_executable(Codec.encode(term))
     assert {:error, :undecodable} = Codec.decode_non_executable(Codec.encode(&Enum.count/1))
     assert {:error, :undecodable} = Codec.decode_non_executable("invalid")

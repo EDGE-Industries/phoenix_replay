@@ -3,8 +3,8 @@ defmodule PhoenixReplay.Sanitizer.Serializable do
   Default sanitization plus removal of values that cannot be serialized safely.
 
   This opt-in sanitizer delegates key filtering and runtime compaction to
-  `PhoenixReplay.Sanitizer.Default`, then replaces functions, pids, ports and
-  references with `nil` at every nested position. It keeps map and struct
+  `PhoenixReplay.Sanitizer.Default`, then marks functions with `PhoenixReplay.Recording.Value.Callback` and
+  replaces pids, ports and references with `nil` at every nested position. It keeps map and struct
   shapes, list and tuple types, and typed standard-library values such as
   `DateTime`.
 
@@ -24,8 +24,12 @@ defmodule PhoenixReplay.Sanitizer.Serializable do
     params |> PhoenixReplay.Sanitizer.Default.sanitize_params() |> drop_runtime_values()
   end
 
+  defp drop_runtime_values(value) when is_function(value) do
+    PhoenixReplay.Recording.Value.Callback.from_function(value)
+  end
+
   defp drop_runtime_values(value)
-       when is_function(value) or is_pid(value) or is_port(value) or is_reference(value),
+       when is_pid(value) or is_port(value) or is_reference(value),
        do: nil
 
   defp drop_runtime_values(map) when is_map(map),

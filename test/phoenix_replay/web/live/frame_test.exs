@@ -11,6 +11,23 @@ defmodule PhoenixReplay.Web.Live.FrameTest do
 
   @endpoint PhoenixReplay.Test.Endpoint
 
+  defmodule SocketView do
+    use Phoenix.LiveView
+
+    def render(assigns) do
+      ~H"""
+      <span id="socket">{socket_kind(@socket)}</span>
+      """
+    end
+
+    def socket_kind(%Phoenix.LiveView.Socket{
+          assigns: %Phoenix.LiveView.Socket.AssignsNotInSocket{}
+        }),
+        do: "wrapped"
+
+    def socket_kind(_socket), do: "unwrapped"
+  end
+
   setup context do
     on_exit(fn -> Storage.clear(Fixtures.storage()) end)
     Sessions.setup_sessions(context)
@@ -234,6 +251,23 @@ defmodule PhoenixReplay.Web.Live.FrameTest do
     assert render(view) =~ ~s(<span id="count">1</span>)
 
     assert view |> element("button", "+") |> render_click() =~ ~s(<span id="count">1</span>)
+  end
+
+  test "preflight renders the recorded view with LiveView's socket assign" do
+    save(%PhoenixReplay.Recording{
+      id: "socket-assign",
+      view: SocketView,
+      connected_at: System.system_time(:millisecond),
+      events: [
+        %Event{at: 0, type: :mount, data: %{assigns: %{}}},
+        %Event{at: 5, type: :render, data: %{assigns: %{}}}
+      ]
+    })
+
+    {:ok, _view, html} = live(build_conn(), "/replay/socket-assign/frame")
+
+    assert html =~ ~s(<span id="socket">wrapped</span>)
+    refute html =~ "Could not render"
   end
 
   test "loads the host stylesheet and the dashboard bundle" do
