@@ -158,6 +158,23 @@ defmodule PhoenixReplay.Test.EctoStorageCase do
           assert ids(query.(now: 10, limit: 0)) == {[], 4}
         end
 
+        test "filters text and events before counting and paging", %{opts: opts} do
+          query = fn params, page_opts ->
+            ids(EctoStorage.query(Filter.from_params(params), [now: 10] ++ page_opts, opts))
+          end
+
+          assert query.(%{"q" => "sale"}, limit: 1) == {~w(b), 1}
+
+          for params <- [%{"event" => "inc"}, %{"q" => "INC"}] do
+            assert query.(params, limit: 2) == {~w(d c), 4}
+            assert query.(params, offset: 2, limit: 1) == {~w(b), 4}
+            assert query.(params, limit: 0) == {[], 4}
+          end
+
+          assert query.(%{"event" => "inc", "mark" => "Paid"}, offset: 1, limit: 1) ==
+                   {~w(b), 2}
+        end
+
         test "checks each criterion in SQL", %{opts: opts} do
           query = &ids(EctoStorage.query(Filter.from_params(&1), [now: 10, limit: 10], opts))
 

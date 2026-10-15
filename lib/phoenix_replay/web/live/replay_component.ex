@@ -11,7 +11,7 @@ defmodule PhoenixReplay.Web.Live.ReplayComponent do
 
   use Phoenix.LiveComponent
 
-  alias PhoenixReplay.Web.Rendering
+  alias PhoenixReplay.Web.{Callbacks, Rendering}
 
   @replay_keys [:__replay_module__, :__replay_id__, :__replay_states__]
 
@@ -31,12 +31,24 @@ defmodule PhoenixReplay.Web.Live.ReplayComponent do
       |> Map.drop(@replay_keys)
       |> Map.reject(fn {key, value} -> key == :id and value == {module, id} end)
 
+    previous = socket.private[:phoenix_replay_template_assigns] || %{}
+    passed = if Map.has_key?(assigns, :__replay_module__), do: passed, else: previous
     recorded = Map.get(states, {module, id}, %{})
+    restored = Callbacks.restore(Map.merge(passed, recorded), passed)
+
+    removed =
+      socket.assigns
+      |> Map.drop([:__changed__ | @replay_keys])
+      |> Rendering.assignable()
+      |> Map.keys()
+      |> Kernel.--(Map.keys(restored))
 
     {:ok,
      socket
+     |> Phoenix.LiveView.put_private(:phoenix_replay_template_assigns, passed)
+     |> assign(Map.new(removed, &{&1, nil}))
      |> assign(replay)
-     |> assign(passed |> Map.merge(recorded) |> Rendering.assignable())}
+     |> assign(Rendering.assignable(restored))}
   end
 
   @impl true

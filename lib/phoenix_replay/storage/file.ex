@@ -131,11 +131,7 @@ defmodule PhoenixReplay.Storage.File do
   end
 
   defp ask(pid) do
-    {command, args} =
-      case :os.type() do
-        {:win32, _name} -> {"tasklist", ["/FI", "PID eq #{pid}", "/NH"]}
-        {:unix, _name} -> {"kill", ["-0", pid]}
-      end
+    {command, args} = PhoenixReplay.Storage.Writer.command(pid)
 
     case System.find_executable(command) do
       nil ->

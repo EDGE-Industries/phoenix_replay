@@ -46,6 +46,93 @@ The table is versioned, and pinning the version keeps the migration doing the sa
 
 The dashboard reads one page at a time in SQL, with a count for the total. Event names are stored encoded, so text search, which also matches event names, and filtering by an event name check the rows that match the other filters after reading them. The names the filter suggests come from the 500 most recent recordings.
 
+## S3
+
+Store recordings in an S3-compatible object store with the optional `ex_aws`
+and `ex_aws_s3` dependencies. Supply ExAws with an HTTP client and XML parser
+as well; for example, `req` and `sweet_xml`, with
+`config :ex_aws, http_client: ExAws.Request.Req`. The bucket must already exist.
+Use the serializable sanitizer when assigns contain runtime functions or handles:
+
+```elixir
+config :phoenix_replay,
+  storage: {
+    PhoenixReplay.Storage.S3,
+    bucket: "my-replay-bucket",
+    prefix: "my-app/replays",
+    writer_node: "my-app-node-1"
+  },
+  sanitizer: PhoenixReplay.Sanitizer.Serializable
+```
+
+The adapter writes recordings below `recordings/`, summaries below
+`summaries/`, and running-session chunks below `partials/` under the prefix.
+It lists and reads summaries for the dashboard, stores chunks as immutable
+objects, and retries publication during recovery when a completed recording has
+no summary. Before final publication, it writes a compressed full-recording
+checkpoint below `partials/`. This checkpoint makes publication recoverable
+even when no periodic chunk was uploaded, including with `flush: false`.
+It removes the checkpoint after publication succeeds. It uses `&ExAws.request/1`
+by default; pass an equivalent request
+function in tests and custom clients. Configure credentials, regions and
+endpoints through ExAws. Set `writer_node` to a non-empty identity that is
+unique per node and stable across restarts. The adapter hashes this identity
+into the partial-object path so recovery does not mix writers.
+
+The recorder gives each session a unique ID and one writer. Each recording has
+one pending checkpoint per writer node, so a new save replaces an older failed
+attempt. Recovery treats this checkpoint as authoritative, publishes it unchanged
+before using existing recording or summary data, and removes it before chunk
+cleanup. Retries reuse the checkpoint's publication timestamp. Cleanup of an
+already published recording preserves its metadata. This also covers failed
+replacements of an existing ID.
+
+Reads use the shared codec to decode non-executable terms. On a cold node, a
+failed decode loads modules available on the code path once and retries, as
+file storage does. This loads existing library and application code, not module
+names supplied by stored data. Unknown atoms without code remain unreadable.
+
+## S3 and PostgreSQL metadata
+
+When an S3 archive grows beyond a small summary scan, keep the compressed
+recordings in S3 and put their searchable summaries in PostgreSQL:
+
+```elixir
+config :phoenix_replay,
+  storage: {
+    PhoenixReplay.Storage.S3Postgres,
+    repo: MyApp.ReplayRepo,
+    bucket: "my-replay-bucket",
+    prefix: "my-app/replays",
+    writer_node: "my-app-node-1"
+  }
+```
+
+Run `PhoenixReplay.Storage.S3Postgres.Migration.up()` from a migration in the
+replay database. The migration is PostgreSQL-specific. It stores event names
+as a text array and marks as JSONB, with GIN indexes for both. Rows are scoped
+by the S3 bucket and trimmed prefix, so storage namespaces can share a metadata
+database. Filters,
+facets, counts, histogram buckets and pagination for saved recordings run in
+SQL. Active sessions remain in the in-memory session catalog. Opening a row
+fetches its recording object from S3. The adapter writes the S3 object before
+the metadata row, so a failed database write leaves a recording and publication
+checkpoint for recovery; it publishes no incomplete metadata row. Successful
+publication removes the checkpoint and partial chunks.
+
+The text query uses case-insensitive substring predicates across each
+searchable field and does not require a PostgreSQL extension. Add `pg_trgm`
+indexes later if text search becomes a high-volume query.
+
+Clearing this backend deletes all S3 objects below its configured prefix and
+then removes that namespace's metadata rows.
+
+The replay repo can use the same PostgreSQL server as the application with a
+separate database and the `public` schema. If it is not already started by the
+host application, the adapter starts the configured repo before recovery runs.
+The consuming application must provide `ecto_sql`, `postgrex`, `ex_aws` and
+`ex_aws_s3`.
+
 ## Running sessions
 
 A running session is buffered in memory. With file storage, PhoenixReplay also writes it to disk in chunks while it runs, so its events leave memory however long it lasts, and a crash of the node loses at most the last few seconds:

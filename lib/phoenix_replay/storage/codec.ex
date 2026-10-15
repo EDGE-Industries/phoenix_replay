@@ -38,13 +38,33 @@ defmodule PhoenixReplay.Storage.Codec do
   """
   @spec decode(binary(), module() | :list) :: {:ok, struct() | list()} | {:error, :undecodable}
   def decode(binary, shape) when is_binary(binary) and is_atom(shape) do
-    with {:error, :undecodable} <- safe_decode(binary, shape),
+    decode_with_modules(fn -> safe_decode(binary, shape) end)
+  end
+
+  @doc """
+  Decodes a stored term without executable values. Retries after loading the
+  modules available on the code path, as `decode/2` does. Returns
+  `{:error, :undecodable}` for corrupt data, unknown atoms, or runtime functions.
+  """
+  @spec decode_non_executable(binary()) :: {:ok, term()} | {:error, :undecodable}
+  def decode_non_executable(binary) when is_binary(binary) do
+    decode_with_modules(fn -> non_executable_term(binary) end)
+  end
+
+  defp decode_with_modules(decode) do
+    with {:error, :undecodable} <- decode.(),
          true <- load_available_modules() do
-      safe_decode(binary, shape)
+      decode.()
     else
       false -> {:error, :undecodable}
       decoded -> decoded
     end
+  end
+
+  defp non_executable_term(binary) do
+    {:ok, Plug.Crypto.non_executable_binary_to_term(binary, [:safe])}
+  rescue
+    ArgumentError -> {:error, :undecodable}
   end
 
   defp safe_decode(binary, shape) do

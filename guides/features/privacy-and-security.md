@@ -22,6 +22,7 @@ Everything recorded passes through a `PhoenixReplay.Sanitizer` before it is stor
 `PhoenixReplay.Sanitizer.Default`:
 
 - replaces the values of keys containing `password`, `token`, `secret`, `api_key`, `apikey`, `private_key`, `credential`, `card_number`, `credit_card` or `one_time`, in any case, with `"[FILTERED]"`; keys are kept so templates still render,
+- preserves `nil` and boolean assign values under those keys, atom values for sensitive keys ending in `_field` or `_action_name`, and the shape of sensitive assign maps ending in `_params` while masking their payload values,
 - in params and form values, also filters keys with `cvv`, `cvc`, `csc`, `ssn`, `pin` or `otp` as a word of their own (`card_cvv`, `pinCode`, but not `shipping`); assigns keep those, since an assign such as `:pin` is rarely a secret and a filtered one can break the replay,
 - recurses into maps, lists, tuples and structs, including Ecto schemas,
 - compacts `Ecto.Changeset` and `Phoenix.HTML.Form` runtime metadata,
@@ -52,6 +53,15 @@ config :phoenix_replay, sanitizer: MyApp.ReplaySanitizer
 ```
 
 A sanitizer can also be set per live session with `on_mount: [{PhoenixReplay.Recorder, sanitizer: MyApp.CheckoutSanitizer}]`. Keep sanitizers free of exceptions: they run inside your LiveViews.
+
+For recordings that can contain runtime values such as functions or process
+identifiers, use `PhoenixReplay.Sanitizer.Serializable`. It keeps the default
+key filtering, records function identities as non-executable `PhoenixReplay.Recording.Value.Callback` markers, and replaces pids, ports and references with `nil`. This applies inside structs, maps, lists and tuples. Markers distinguish a removed function from a recorded `nil`; they store only arity and a hash of the code origin, with no function body or closure data:
+
+```elixir
+config :phoenix_replay,
+  sanitizer: PhoenixReplay.Sanitizer.Serializable
+```
 
 ## Redacting values
 

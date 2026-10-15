@@ -177,3 +177,12 @@ PhoenixReplay is one building block of a larger stack — tools that make AI-gen
 ## License
 
 MIT © 2026 Danila Poyarkov
+
+## EDGE fork
+
+This fork adds reusable assign capture policies, chunked S3-compatible storage,
+and an opt-in serializable sanitizer. See the recording and storage guides.
+The dashboard and client source remain unchanged. Release browser bundles are
+tracked so applications can use this repository as a Git dependency without
+building the dashboard themselves. Rebuild and commit those bundles when the
+browser source changes.

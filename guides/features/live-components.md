@@ -21,6 +21,12 @@ The replay frame renders your view's template, which contains your components. B
 1. the assigns the parent passes in the template, merged with
 2. the assigns recorded for that component at the current position.
 
+With `PhoenixReplay.Sanitizer.Serializable`, functions are recorded as non-executable callback identities. Replay matches them to functions from the current parent template, including callbacks copied into derived maps, structs, lists or tuples. It keeps recorded data and preserves recorded `nil` values.
+
+A callback identity contains its arity and a hash of its code origin, without its body or captured environment. Replay does not match callbacks by list position. If the template contains different closures with the same origin, replay requires matching map metadata or a matching map-key location. Otherwise it leaves the callback unavailable. Code changes can invalidate local callback identities; replay does not guess a replacement.
+
+The original component's `mount/1`, `update/2` and event handlers do not run during replay. A callback created only inside those functions cannot be restored from the parent template.
+
 Nested components are swapped the same way. When you seek, the frame refreshes each component with `send_update/3`, so components update even when their parent's template did not change. A component that fails to render with the recorded assigns shows a placeholder in its place.
 
 ## Async results

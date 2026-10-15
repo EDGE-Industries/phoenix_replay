@@ -309,3 +309,55 @@ Replay reconstructs the assigns of LiveViews and LiveComponents. It does not rec
 Replay renders today's templates with the assigns recorded then. When a template reads an assign a recording lacks, such as one added after the session was recorded, the replay renders it as `nil`, which most templates take as unset, and the player notes "Not in recording: @name". A template that cannot take `nil` there still shows a placeholder for that moment.
 
 Recordings name modules as atoms: the view, its LiveComponents, and structs in assigns. They are read back only with atoms the node knows, so a recording that names a module deleted or renamed since can no longer be read; rename a LiveView or LiveComponent only once its recordings no longer matter. Which code each recording was made with is kept by name, so that much stays readable.
+
+## Assign capture policies
+
+This fork adds optional per-view capture callbacks. They only affect the
+recorded copy and never change the live socket assigns.
+
+```elixir
+@behaviour PhoenixReplay.Capture.Policy
+
+def replay_excluded_assigns, do: [:large_runtime_cache, :pending_projection]
+```
+
+Global `exclude_assigns` configuration, live-session options, and the view's
+callback combine by union. Resolve the policy once per recorded mount.
+For a live session:
+
+```elixir
+live_session :operations,
+  on_mount: [{PhoenixReplay.Recorder, exclude_assigns: [:pending_projection]}] do
+  live "/operations", OperationsLive
+end
+```
+
+The first recorder hook owns the mount decision. Repeated hooks do not open
+another recording or undo a session that disables sampling.
+
+For a full snapshot transform:
+
+```elixir
+def replay_capture_assigns(assigns), do: Map.take(assigns, [:count, :selected_panel, :flash])
+```
+
+It runs after mount at the first render, then on changed renders. It must be
+pure, fast, and return a map with atom keys. A view callback overrides a session
+`capture_assigns` option, which overrides the global option. Configuration
+accepts a function of one argument or `{module, function}`; prefer a named
+function so the recording's policy descriptor identifies it.
+
+The recorder applies the transform, exclusions, LiveView bookkeeping removal,
+and sanitizer, in that order. Static exclusions filter sparse updates without
+keeping a second snapshot. Transforms compare against their previous sanitized
+snapshot and record explicit `removed` keys. The timeline applies those removals
+and keeps an omitted key distinct from a captured `nil`, including rewind.
+Components retain their own existing sanitizer path.
+
+`Recording.capture_policy` stores the policy identifier, excluded keys,
+transform descriptor, and initial policy status. It never stores callback
+closures. If a view callback, transform, or assign sanitizer fails, view-assign
+capture stops for that recording. The live page continues, one generic error
+log is recorded, and `[:phoenix_replay, :capture, :failed]` telemetry is emitted.
+There is no fallback to raw assigns. Event, parameter, and component capture
+keep their existing paths.

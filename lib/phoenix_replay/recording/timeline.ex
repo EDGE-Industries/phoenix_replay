@@ -189,7 +189,13 @@ defmodule PhoenixReplay.Recording.Timeline do
         %{timeline | assigns: Map.update!(timeline.assigns, @state, &State.apply(&1, event))}
 
       %Event{type: :render, data: %{assigns: assigns}} ->
-        %{timeline | assigns: Map.merge(timeline.assigns, assigns)}
+        %{
+          timeline
+          | assigns:
+              timeline.assigns
+              |> Map.drop(Map.get(event.data, :removed, []))
+              |> Map.merge(assigns)
+        }
 
       %Event{type: :component, data: %{module: module, id: id, assigns: assigns}} ->
         components =

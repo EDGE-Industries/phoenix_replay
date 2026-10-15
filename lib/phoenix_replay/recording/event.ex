@@ -11,7 +11,7 @@ defmodule PhoenixReplay.Recording.Event do
     * `:params` — `%{params: map, uri: String.t()}`, a `handle_params/3` call
     * `:info` — `%{tag: atom | nil}`, a `handle_info/2` call; only the message
       tag is kept so arbitrary message contents are never stored
-    * `:render` — `%{assigns: map}`, the assigns changed by a render
+    * `:render` — `%{assigns: map, removed: [atom]}`, changed and removed assigns
     * `:component` — `%{module: module, id: term, assigns: map}`, the
       assigns of a LiveComponent changed by an update or event
     * `:component_destroyed` — `%{module: module, id: term}`, a
@@ -101,9 +101,9 @@ defmodule PhoenixReplay.Recording.Event do
   entry reported.
   """
   @spec changed_keys(t() | nil) :: [atom()]
-  def changed_keys(%__MODULE__{type: type, data: %{assigns: assigns}})
+  def changed_keys(%__MODULE__{type: type, data: %{assigns: assigns}} = event)
       when type in [:mount, :render],
-      do: Map.keys(assigns)
+      do: Enum.uniq(Map.keys(assigns) ++ Map.get(event.data, :removed, []))
 
   def changed_keys(%__MODULE__{type: :state}), do: [PhoenixReplay.Recording.State.assign()]
   def changed_keys(_event), do: []

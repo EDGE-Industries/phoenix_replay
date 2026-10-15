@@ -40,6 +40,7 @@ if Code.ensure_loaded?(Ecto.Query) do
     alias PhoenixReplay.Recording
     alias PhoenixReplay.Recording.{Client, Filter, Summary}
     alias PhoenixReplay.Storage.Codec
+    alias PhoenixReplay.Storage.EctoQuery
 
     @table "phoenix_replay_recordings"
     @marks "phoenix_replay_marks"
@@ -143,9 +144,7 @@ if Code.ensure_loaded?(Ecto.Query) do
 
       summaries =
         matching
-        |> order_by(desc: :connected_at, desc: :id)
-        |> offset(^Keyword.get(page_opts, :offset, 0))
-        |> limit(^Keyword.fetch!(page_opts, :limit))
+        |> EctoQuery.page(page_opts)
         |> summaries(opts)
 
       {summaries, total}
@@ -158,7 +157,7 @@ if Code.ensure_loaded?(Ecto.Query) do
       {page, total} =
         %{filter | event: nil, query: nil}
         |> matching(page_opts)
-        |> order_by(desc: :connected_at, desc: :id)
+        |> order_by([r], desc: r.connected_at, desc: r.id)
         |> select([r], map(r, ^[:event_names | @summary_fields]))
         |> repo(opts).all()
         |> Enum.map(&to_summary/1)
@@ -191,7 +190,7 @@ if Code.ensure_loaded?(Ecto.Query) do
     end
 
     defp criterion(column, value) when column in @columns,
-      do: dynamic([r], field(r, ^column) == ^value)
+      do: EctoQuery.equal(column, value)
 
     defp criterion(:mark, name) do
       marked =
@@ -261,28 +260,9 @@ if Code.ensure_loaded?(Ecto.Query) do
 
     @impl true
     def histogram(%Filter{event: nil, query: nil} = filter, size, page_opts, opts) do
-      utc_offset = Keyword.get(page_opts, :utc_offset, 0)
-
       filter
       |> matching(page_opts)
-      |> group_by(selected_as(:bucket))
-      |> order_by(selected_as(:bucket))
-      |> select([r], {
-        selected_as(
-          fragment(
-            "(? + ?) - ((? + ?) % ?) - ?",
-            r.connected_at,
-            ^utc_offset,
-            r.connected_at,
-            ^utc_offset,
-            ^size,
-            ^utc_offset
-          ),
-          :bucket
-        ),
-        count(r.id),
-        sum(fragment("CASE WHEN ? > 0 THEN 1 ELSE 0 END", r.error_count))
-      })
+      |> EctoQuery.histogram(size, page_opts)
       |> repo(opts).all()
       |> Enum.map(fn {start, sessions, errors} -> {start, sessions, errors || 0} end)
     end
